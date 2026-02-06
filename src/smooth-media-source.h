@@ -52,8 +52,10 @@ struct smooth_media_source {
 	volatile bool reconnecting;
 
 	/* Timestamp tracking for output */
-	int64_t base_ts;           /* base output timestamp */
-	int64_t audio_out_ts;      /* monotonic audio output timestamp */
+	int64_t base_ts;           /* wall clock when anchor_pts was set */
+	int64_t anchor_pts;        /* shared stream PTS anchor for A/V sync */
+	bool anchor_set;           /* true once anchor_pts is established */
+	int64_t audio_out_ts;      /* last audio output timestamp */
 	int64_t video_out_ts;      /* last video output timestamp */
 	bool first_audio;
 	bool first_video;
@@ -61,7 +63,9 @@ struct smooth_media_source {
 	int64_t first_audio_pts;
 	int64_t first_video_pts;
 	uint64_t audio_frames_out;     /* counter for periodic diagnostics */
+	uint64_t video_frames_out;     /* counter for periodic diagnostics */
 	uint64_t last_drop_count;      /* for detecting new drops */
+	int64_t last_diag_time;        /* wall clock of last diagnostic log */
 
 	/* State */
 	enum obs_media_state state;

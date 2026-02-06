@@ -114,11 +114,17 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	int64_t wall_now = (int64_t)os_gettime_ns();
 	clock_tracker_record(&s->clock, vf->pts_ns, wall_now);
 
+	/* Set shared anchor on first PTS seen (audio or video) */
+	if (!s->anchor_set) {
+		s->anchor_pts = vf->pts_ns;
+		s->base_ts = wall_now;
+		s->anchor_set = true;
+	}
+
 	/* Set anchor on first video */
 	if (!s->first_video) {
 		s->first_video = true;
 		s->first_video_pts = vf->pts_ns;
-		s->base_ts = wall_now;
 		SM_LOG(LOG_INFO,
 		       "First video frame: %dx%d fmt=%d pts=%lldms",
 		       vf->width, vf->height, vf->format,
@@ -126,18 +132,14 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	}
 
 	/* Compute output timestamp.
-	 * When sync_to_stream is enabled, we use wall clock directly.
-	 * The clock tracker measures drift for sample-rate correction,
-	 * but timestamps must stay at wall-clock pace to prevent OBS
-	 * from escalating its audio buffering. */
-	int64_t out_ts;
-	if (s->sync_to_stream) {
-		out_ts = (int64_t)os_gettime_ns();
-	} else {
-		/* Fallback: simple offset from base */
-		out_ts = s->base_ts + (vf->pts_ns - s->first_video_pts);
-	}
+	 * Use stream PTS mapped to wall clock via a shared anchor.
+	 * Both audio and video use the same formula so they stay
+	 * perfectly in sync. For near-realtime streams, PTS advances
+	 * at approximately wall-clock rate, so timestamps stay close
+	 * to os_gettime_ns() without per-frame jitter. */
+	int64_t out_ts = s->base_ts + (vf->pts_ns - s->anchor_pts);
 	s->video_out_ts = out_ts;
+	s->video_frames_out++;
 
 	/* Build OBS frame */
 	struct obs_source_frame frame = {0};
@@ -204,12 +206,17 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	int64_t wall_now = (int64_t)os_gettime_ns();
 	clock_tracker_record(&s->clock, af->pts_ns, wall_now);
 
+	/* Set shared anchor on first PTS seen (audio or video) */
+	if (!s->anchor_set) {
+		s->anchor_pts = af->pts_ns;
+		s->base_ts = wall_now;
+		s->anchor_set = true;
+	}
+
 	/* Set anchor on first audio */
 	if (!s->first_audio) {
 		s->first_audio = true;
 		s->first_audio_pts = af->pts_ns;
-		if (!s->first_video)
-			s->base_ts = wall_now;
 		SM_LOG(LOG_INFO,
 		       "First audio frame: %uHz %uch %u samples pts=%lldms",
 		       af->sample_rate, af->channels, af->frames,
@@ -294,25 +301,16 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		}
 
 		/* Compute output timestamp.
-		 * Use monotonically incrementing timestamps for perfect
-		 * frame contiguity. Using os_gettime_ns() per frame causes
-		 * ±1ms jitter → micro-gaps/overlaps → crackles.
+		 * Use stream PTS mapped to wall clock via the shared
+		 * anchor — the same formula used by video. This keeps
+		 * audio and video perfectly in sync.
 		 *
-		 * Instead: set first timestamp to wall clock, then advance
-		 * by exact frame duration. This guarantees each frame
-		 * follows the previous one with zero gap or overlap. */
-		int64_t out_ts;
-		if (s->sync_to_stream) {
-			if (!s->audio_out_ts)
-				s->audio_out_ts = (int64_t)os_gettime_ns();
-			out_ts = s->audio_out_ts;
-			s->audio_out_ts += (int64_t)buf_frame->frames *
-				1000000000LL /
-				(int64_t)adjusted_sample_rate;
-		} else {
-			int64_t anchor = s->first_audio_pts;
-			out_ts = s->base_ts + (buf_frame->pts_ns - anchor);
-		}
+		 * Stream PTS is monotonically increasing and jitter-free
+		 * (unlike os_gettime_ns()), so timestamps are naturally
+		 * contiguous with no gaps or overlaps. */
+		int64_t out_ts = s->base_ts +
+			(buf_frame->pts_ns - s->anchor_pts);
+		s->audio_out_ts = out_ts;
 
 		struct obs_source_audio obs_audio = {0};
 		for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++)
@@ -327,13 +325,25 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		obs_source_output_audio(s->source, &obs_audio);
 
 		s->audio_frames_out++;
-		/* Log rate diagnostics every ~500 frames (~10s at 48kHz/1024) */
-		if (s->sync_to_stream && (s->audio_frames_out % 500) == 0) {
-			SM_LOG(LOG_DEBUG,
-			       "Clock rate=%.4f, adj_sr=%u, drift=%lldms, buf=%lldms",
+
+		/* Diagnostic logging every ~1 second */
+		if (s->sync_to_stream &&
+		    (wall_now - s->last_diag_time) >= 1000000000LL) {
+			int64_t av_delta = s->audio_out_ts - s->video_out_ts;
+			SM_LOG(LOG_INFO,
+			       "DIAG: rate=%.4f adj_sr=%u drift=%lldms "
+			       "buf=%lldms a_out=%llu v_out=%llu "
+			       "av_delta=%lldms a_ts=%lld v_ts=%lld wall=%lld",
 			       rate, adjusted_sample_rate,
 			       (long long)(clock_tracker_get_drift(&s->clock) / 1000000),
-			       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000));
+			       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000),
+			       (unsigned long long)s->audio_frames_out,
+			       (unsigned long long)s->video_frames_out,
+			       (long long)(av_delta / 1000000),
+			       (long long)(s->audio_out_ts / 1000000),
+			       (long long)(s->video_out_ts / 1000000),
+			       (long long)(wall_now / 1000000));
+			s->last_diag_time = wall_now;
 		}
 	}
 }
@@ -455,11 +465,15 @@ static void start_media(struct smooth_media_source *s)
 	s->first_audio = false;
 	s->first_video = false;
 	s->got_first_keyframe = false;
+	s->anchor_set = false;
+	s->anchor_pts = 0;
 	s->audio_out_ts = 0;
 	s->video_out_ts = 0;
 	s->base_ts = 0;
 	s->audio_frames_out = 0;
+	s->video_frames_out = 0;
 	s->last_drop_count = 0;
+	s->last_diag_time = 0;
 	s->active = true;
 	s->kill = false;
 
