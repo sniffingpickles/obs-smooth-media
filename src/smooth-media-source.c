@@ -281,14 +281,15 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		 * causes a click at the frame boundary → "crunchy" sound.
 		 *
 		 * Two safeguards:
-		 * 1. Deadzone: don't adjust if rate is within 0.5% of 1.0
-		 *    (stream is near real-time, no correction needed)
+		 * 1. Deadzone: don't adjust if rate is within 3% of 1.0
+		 *    (network jitter causes ±2% oscillation for near-
+		 *    realtime streams — must ignore this noise)
 		 * 2. Quantize: snap to nearest 100 Hz so the value stays
 		 *    stable across frames */
 		double rate = clock_tracker_get_smoothed_rate(&s->clock);
 
 		uint32_t adjusted_sample_rate = buf_frame->sample_rate;
-		if (s->sync_to_stream && fabs(rate - 1.0) > 0.005) {
+		if (s->sync_to_stream && fabs(rate - 1.0) > 0.03) {
 			uint32_t raw = (uint32_t)(
 				(double)buf_frame->sample_rate * rate);
 			/* Quantize to nearest 100 Hz for stability */

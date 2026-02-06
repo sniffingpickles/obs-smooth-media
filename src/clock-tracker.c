@@ -2,8 +2,8 @@
 #include <string.h>
 #include <math.h>
 
-#define DEFAULT_WINDOW_NS  (2000000000LL)  /* 2 seconds */
-#define DEFAULT_EMA_ALPHA  0.05
+#define DEFAULT_WINDOW_NS  (5000000000LL)  /* 5 seconds */
+#define DEFAULT_EMA_ALPHA  0.02
 
 void clock_tracker_init(struct clock_tracker *ct)
 {
