@@ -250,9 +250,20 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000));
 	}
 
-	/* Drain ready frames from the jitter buffer */
+	/* Drain ONE frame from the jitter buffer per push.
+	 *
+	 * Previously this was a `while` loop that drained ALL frames.
+	 * That made the buffer drop to 0 after the initial prime, turning
+	 * it into a pass-through for the rest of the session — no jitter
+	 * absorption at all. Network bursts and decoder stalls passed
+	 * straight through, causing clicks when timestamps fell behind.
+	 *
+	 * With `if` (pop 1 per push), the buffer stays at its primed
+	 * level permanently (e.g. ~4 frames at 80ms). This provides
+	 * ongoing absorption of network jitter and decoder timing
+	 * variations throughout the entire session. */
 	struct audio_buf_frame *buf_frame;
-	while (audio_buffer_pop(&s->audio_buf, &buf_frame)) {
+	if (audio_buffer_pop(&s->audio_buf, &buf_frame)) {
 		/* Rate-adjust: if stream is slow, we slightly reduce the
 		 * declared sample rate so OBS plays samples slower,
 		 * matching the stream's actual data production rate.
