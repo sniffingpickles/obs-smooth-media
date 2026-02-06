@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path deps -Force | Out-Null
-          $url = "https://github.com/obsproject/obs-studio/releases/download/${{ env.OBS_VERSION }}/OBS-Studio-${{ env.OBS_VERSION }}-Windows.zip"
+          $url = "https://github.com/obsproject/obs-studio/releases/download/${{ env.OBS_VERSION }}/OBS-Studio-${{ env.OBS_VERSION }}-Windows-x64.zip"
           Write-Host "Downloading OBS Studio ${{ env.OBS_VERSION }}..."
           Invoke-WebRequest -Uri $url -OutFile deps/obs.zip -UseBasicParsing
           Expand-Archive -Path deps/obs.zip -DestinationPath deps/obs-studio -Force
