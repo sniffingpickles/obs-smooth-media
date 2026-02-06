@@ -253,19 +253,6 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	/* Drain ready frames from the jitter buffer */
 	struct audio_buf_frame *buf_frame;
 	while (audio_buffer_pop(&s->audio_buf, &buf_frame)) {
-		/* Compute output timestamp.
-		 * When sync_to_stream is enabled, use wall clock directly.
-		 * This prevents OBS from escalating audio buffering.
-		 * Sample rate correction (below) handles the actual
-		 * pacing to match the stream's data production rate. */
-		int64_t out_ts;
-		if (s->sync_to_stream) {
-			out_ts = (int64_t)os_gettime_ns();
-		} else {
-			int64_t anchor = s->first_audio_pts;
-			out_ts = s->base_ts + (buf_frame->pts_ns - anchor);
-		}
-
 		/* Rate-adjust: if stream is slow, we slightly reduce the
 		 * declared sample rate so OBS plays samples slower,
 		 * matching the stream's actual data production rate.
@@ -293,6 +280,27 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 				adjusted_sample_rate = buf_frame->sample_rate / 2;
 			if (adjusted_sample_rate > buf_frame->sample_rate * 2)
 				adjusted_sample_rate = buf_frame->sample_rate * 2;
+		}
+
+		/* Compute output timestamp.
+		 * Use monotonically incrementing timestamps for perfect
+		 * frame contiguity. Using os_gettime_ns() per frame causes
+		 * ±1ms jitter → micro-gaps/overlaps → crackles.
+		 *
+		 * Instead: set first timestamp to wall clock, then advance
+		 * by exact frame duration. This guarantees each frame
+		 * follows the previous one with zero gap or overlap. */
+		int64_t out_ts;
+		if (s->sync_to_stream) {
+			if (!s->audio_out_ts)
+				s->audio_out_ts = (int64_t)os_gettime_ns();
+			out_ts = s->audio_out_ts;
+			s->audio_out_ts += (int64_t)buf_frame->frames *
+				1000000000LL /
+				(int64_t)adjusted_sample_rate;
+		} else {
+			int64_t anchor = s->first_audio_pts;
+			out_ts = s->base_ts + (buf_frame->pts_ns - anchor);
 		}
 
 		struct obs_source_audio obs_audio = {0};
