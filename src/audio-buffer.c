@@ -159,9 +159,9 @@ bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out)
 	ab->count--;
 	ab->frames_out++;
 
-	/* If buffer drains below minimum, un-prime so we wait for more data */
-	if (ab->count == 0)
-		ab->primed = false;
+	/* Once primed, stay primed. Only audio_buffer_reset() clears this.
+	 * Un-priming on empty caused a stutter cycle: fill 500ms → burst
+	 * drain → silence while re-filling → repeat every 500ms. */
 
 	return true;
 }
