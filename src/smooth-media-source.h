@@ -49,9 +49,6 @@ struct smooth_media_source {
 	volatile bool reconnecting;
 
 	/* Timestamp tracking for output */
-	int64_t base_ts;           /* wall clock when anchor_pts was set */
-	int64_t anchor_pts;        /* shared stream PTS anchor for A/V sync */
-	bool anchor_set;           /* true once anchor_pts is established */
 	int64_t audio_out_ts;      /* last audio output timestamp */
 	int64_t video_out_ts;      /* last video output timestamp */
 	bool first_audio;
