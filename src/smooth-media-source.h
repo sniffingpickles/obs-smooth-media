@@ -1,0 +1,70 @@
+#pragma once
+
+#include <obs-module.h>
+#include <util/threading.h>
+#include <util/platform.h>
+
+#include "stream-decoder.h"
+#include "audio-buffer.h"
+#include "clock-tracker.h"
+
+/*
+ * Smooth Media Source — OBS source plugin for stutter-free RTMP/SRT playback.
+ *
+ * This source does its own FFmpeg demuxing and uses clock drift tracking
+ * plus an audio jitter buffer to eliminate the audio stutter that occurs
+ * when live streams deliver data slightly slower than realtime.
+ */
+
+struct smooth_media_source {
+	obs_source_t *source;
+
+	/* Settings */
+	char *url;
+	char *input_format;
+	char *ffmpeg_options;
+	int buffering_mb;
+	bool hw_decode;
+	int reconnect_delay_sec;
+	int64_t jitter_buffer_ms;
+	int64_t max_buffer_ms;
+	bool sync_to_stream;      /* true = pace output to stream clock */
+
+	/* Decoder */
+	struct stream_decoder *decoder;
+
+	/* Audio buffering and clock tracking */
+	struct audio_buffer audio_buf;
+	struct clock_tracker clock;
+
+	/* Playback state */
+	pthread_t media_thread;
+	bool media_thread_valid;
+	volatile bool active;
+	volatile bool stopping;
+	volatile bool kill;
+
+	/* Reconnection */
+	pthread_t reconnect_thread;
+	pthread_mutex_t reconnect_mutex;
+	bool reconnect_thread_valid;
+	os_event_t *reconnect_stop_event;
+	volatile bool reconnecting;
+
+	/* Timestamp tracking for output */
+	int64_t base_ts;           /* base output timestamp */
+	int64_t audio_out_ts;      /* monotonic audio output timestamp */
+	int64_t video_out_ts;      /* last video output timestamp */
+	bool first_audio;
+	bool first_video;
+	bool got_first_keyframe;
+	int64_t first_audio_pts;
+	int64_t first_video_pts;
+
+	/* State */
+	enum obs_media_state state;
+	pthread_mutex_t state_mutex;
+};
+
+/* OBS source info registration */
+extern struct obs_source_info smooth_media_source_info;

@@ -1,0 +1,14 @@
+build/
+build_*/
+*.o
+*.obj
+*.dll
+*.so
+*.dylib
+*.pdb
+*.lib
+*.exp
+.vs/
+CMakeSettings.json
+.cache/
+compile_commands.json
