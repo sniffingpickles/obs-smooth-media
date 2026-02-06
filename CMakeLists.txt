@@ -10,21 +10,24 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # e.g. cmake -DOBS_DIR="C:/obs-studio" ..
 if(WIN32)
     if(NOT OBS_DIR)
-        # Default: look for portable OBS in common locations
         set(OBS_DIR "C:/obs-studio" CACHE PATH "OBS Studio install directory")
     endif()
 
-    # OBS headers
-    if(EXISTS "${OBS_DIR}/include")
-        set(OBS_INCLUDE_DIR "${OBS_DIR}/include")
-    elseif(EXISTS "${OBS_DIR}/libobs")
-        set(OBS_INCLUDE_DIR "${OBS_DIR}")
+    # OBS headers — can be overridden via -DOBS_INCLUDE_DIR=...
+    if(NOT OBS_INCLUDE_DIR)
+        if(EXISTS "${OBS_DIR}/include")
+            set(OBS_INCLUDE_DIR "${OBS_DIR}/include")
+        elseif(EXISTS "${OBS_DIR}/libobs")
+            set(OBS_INCLUDE_DIR "${OBS_DIR}")
+        endif()
     endif()
 
-    # OBS libraries
-    find_library(OBS_LIB obs PATHS "${OBS_DIR}/lib" "${OBS_DIR}/bin/64bit" "${OBS_DIR}/build_x64/libobs/Release")
-    find_library(OBS_FRONTEND_LIB obs-frontend-api
-        PATHS "${OBS_DIR}/lib" "${OBS_DIR}/bin/64bit" "${OBS_DIR}/build_x64/UI/obs-frontend-api/Release")
+    # OBS import library — can be overridden via -DOBS_LIB=...
+    if(NOT OBS_LIB)
+        find_library(OBS_LIB obs PATHS
+            "${OBS_DIR}/lib" "${OBS_DIR}/bin/64bit"
+            "${OBS_DIR}/build_x64/libobs/Release")
+    endif()
 else()
     # Linux/macOS: use pkg-config or find_package
     find_package(PkgConfig QUIET)
@@ -32,10 +35,14 @@ else()
         pkg_check_modules(OBS QUIET libobs)
     endif()
     if(NOT OBS_FOUND)
-        find_path(OBS_INCLUDE_DIR obs-module.h
-            PATHS /usr/include/obs /usr/local/include/obs
-                  "${OBS_DIR}/include" "${OBS_DIR}/libobs")
-        find_library(OBS_LIB obs PATHS /usr/lib /usr/local/lib "${OBS_DIR}/lib")
+        if(NOT OBS_INCLUDE_DIR)
+            find_path(OBS_INCLUDE_DIR obs-module.h
+                PATHS /usr/include/obs /usr/local/include/obs
+                      "${OBS_DIR}/include" "${OBS_DIR}/libobs")
+        endif()
+        if(NOT OBS_LIB)
+            find_library(OBS_LIB obs PATHS /usr/lib /usr/local/lib "${OBS_DIR}/lib")
+        endif()
     endif()
 endif()
 

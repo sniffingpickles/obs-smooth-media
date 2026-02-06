@@ -32,7 +32,7 @@ jobs:
             deps/obs-studio
             deps/obs-source
             deps/ffmpeg
-          key: deps-obs${{ env.OBS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-v2
+          key: deps-obs${{ env.OBS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-v3
 
       - name: Download OBS Studio (portable)
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -80,17 +80,59 @@ jobs:
             Remove-Item $sub.FullName -Recurse -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Generate OBS import library
+        shell: pwsh
+        run: |
+          # OBS portable only ships DLLs, not .lib import libraries.
+          # Generate obs.lib from obs.dll using MSVC tools.
+          $obsDll = Get-ChildItem -Path deps/obs-studio -Recurse -Filter "obs.dll" | Select-Object -First 1
+          if (-not $obsDll) {
+            Write-Error "obs.dll not found in deps/obs-studio!"
+            exit 1
+          }
+          Write-Host "Found: $($obsDll.FullName)"
+
+          $libDir = "deps/obs-studio/lib"
+          New-Item -ItemType Directory -Path $libDir -Force | Out-Null
+
+          # Export symbols and create .def file
+          $exports = & dumpbin /exports $obsDll.FullName
+          $defContent = "LIBRARY obs`r`nEXPORTS`r`n"
+          $inExports = $false
+          foreach ($line in $exports) {
+            if ($line -match "^\s+ordinal\s+hint\s+RVA\s+name") {
+              $inExports = $true
+              continue
+            }
+            if ($inExports -and $line -match "^\s+Summary") {
+              break
+            }
+            if ($inExports -and $line -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)") {
+              $defContent += "  $($Matches[1])`r`n"
+            }
+          }
+          $defPath = "$libDir/obs.def"
+          Set-Content -Path $defPath -Value $defContent
+          Write-Host "Generated $defPath with exports"
+
+          # Generate import lib
+          & lib /def:$defPath /out:$libDir/obs.lib /machine:x64
+          Write-Host "Generated $libDir/obs.lib"
+
       - name: List dependency structure
         shell: pwsh
         run: |
-          Write-Host "=== OBS portable ==="
-          Get-ChildItem deps/obs-studio -Recurse -Depth 1 | Select-Object FullName
+          Write-Host "=== OBS DLLs ==="
+          Get-ChildItem deps/obs-studio -Recurse -Filter "*.dll" | Select-Object FullName
+          Write-Host ""
+          Write-Host "=== OBS generated libs ==="
+          Get-ChildItem deps/obs-studio -Recurse -Filter "*.lib" | Select-Object FullName
           Write-Host ""
           Write-Host "=== OBS headers ==="
           Get-ChildItem deps/obs-source/libobs -Depth 0 | Select-Object FullName
           Write-Host ""
-          Write-Host "=== FFmpeg ==="
-          Get-ChildItem deps/ffmpeg -Depth 1 | Select-Object FullName
+          Write-Host "=== FFmpeg libs ==="
+          Get-ChildItem deps/ffmpeg/lib -Filter "*.lib" | Select-Object FullName
 
       - name: Configure CMake
         shell: pwsh
@@ -102,6 +144,7 @@ jobs:
           cmake -B build -G "Visual Studio 17 2022" -A x64 `
             -DOBS_DIR="$obsDir" `
             -DOBS_INCLUDE_DIR="$obsSrc/libobs" `
+            -DOBS_LIB="$obsDir/lib/obs.lib" `
             -DFFMPEG_DIR="$ffmpegDir"
 
       - name: Build
