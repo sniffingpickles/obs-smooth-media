@@ -80,6 +80,22 @@ jobs:
             Remove-Item $sub.FullName -Recurse -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Generate OBS build stubs
+        shell: pwsh
+        run: |
+          # obs-config.h includes obsconfig.h which is normally CMake-generated.
+          # Create a stub with the defines our plugin needs.
+          $stubDir = "deps/obs-source/libobs"
+          $stub = @"
+          #pragma once
+          #define OBS_INSTALL_PREFIX ""
+          #define OBS_DATA_PATH "data"
+          #define OBS_PLUGIN_DESTINATION "obs-plugins/64bit"
+          #define OBS_RELATIVE_PREFIX "../../"
+          "@
+          Set-Content -Path "$stubDir/obsconfig.h" -Value $stub
+          Write-Host "Generated obsconfig.h stub"
+
       - name: Generate OBS import library
         shell: pwsh
         run: |
