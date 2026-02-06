@@ -32,7 +32,7 @@ jobs:
             deps/obs-studio
             deps/obs-source
             deps/ffmpeg
-          key: deps-obs${{ env.OBS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-v3
+          key: deps-obs${{ env.OBS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-v4
 
       - name: Download OBS Studio (portable)
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -57,7 +57,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Cloning OBS source for headers..."
-          git clone --depth 1 --filter=blob:none --sparse `
+          git clone --depth 1 --branch ${{ env.OBS_VERSION }} --filter=blob:none --sparse `
             https://github.com/obsproject/obs-studio.git deps/obs-source
           Push-Location deps/obs-source
           git sparse-checkout set libobs deps/w32-pthreads
