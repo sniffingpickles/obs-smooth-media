@@ -60,7 +60,7 @@ jobs:
           git clone --depth 1 --filter=blob:none --sparse `
             https://github.com/obsproject/obs-studio.git deps/obs-source
           Push-Location deps/obs-source
-          git sparse-checkout set libobs
+          git sparse-checkout set libobs deps/w32-pthreads
           Pop-Location
 
       - name: Download FFmpeg dev libraries
@@ -135,6 +135,27 @@ jobs:
           & lib /def:$defPath /out:$libDir/obs.lib /machine:x64
           Write-Host "Generated $libDir/obs.lib"
 
+          # Also generate w32-pthreads.lib
+          $ptDll = Get-ChildItem -Path deps/obs-studio -Recurse -Filter "w32-pthreads.dll" | Select-Object -First 1
+          if ($ptDll) {
+            Write-Host "Found: $($ptDll.FullName)"
+            $ptExports = & dumpbin /exports $ptDll.FullName
+            $ptDef = "LIBRARY w32-pthreads`r`nEXPORTS`r`n"
+            $inPt = $false
+            foreach ($line in $ptExports) {
+              if ($line -match "^\s+ordinal\s+hint\s+RVA\s+name") { $inPt = $true; continue }
+              if ($inPt -and $line -match "^\s+Summary") { break }
+              if ($inPt -and $line -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)") {
+                $ptDef += "  $($Matches[1])`r`n"
+              }
+            }
+            Set-Content -Path "$libDir/w32-pthreads.def" -Value $ptDef
+            & lib /def:$libDir/w32-pthreads.def /out:$libDir/w32-pthreads.lib /machine:x64
+            Write-Host "Generated $libDir/w32-pthreads.lib"
+          } else {
+            Write-Host "WARNING: w32-pthreads.dll not found"
+          }
+
       - name: List dependency structure
         shell: pwsh
         run: |
@@ -161,6 +182,8 @@ jobs:
             -DOBS_DIR="$obsDir" `
             -DOBS_INCLUDE_DIR="$obsSrc/libobs" `
             -DOBS_LIB="$obsDir/lib/obs.lib" `
+            -DW32_PTHREADS_INCLUDE_DIR="$obsSrc/deps/w32-pthreads" `
+            -DW32_PTHREADS_LIB="$obsDir/lib/w32-pthreads.lib" `
             -DFFMPEG_DIR="$ffmpegDir"
 
       - name: Build

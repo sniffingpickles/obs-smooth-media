@@ -112,6 +112,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${AVFORMAT_INCLUDE_DIRS}
 )
 
+# On Windows, OBS uses w32-pthreads for pthread support
+if(WIN32 AND W32_PTHREADS_INCLUDE_DIR)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${W32_PTHREADS_INCLUDE_DIR})
+endif()
+
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ${OBS_LIB}
     ${OBS_LIBRARIES}
@@ -124,8 +129,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 
 if(WIN32)
+    if(W32_PTHREADS_LIB)
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${W32_PTHREADS_LIB})
+    endif()
     target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
-    # Remove 'lib' prefix on Windows
     set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "")
 endif()
 
