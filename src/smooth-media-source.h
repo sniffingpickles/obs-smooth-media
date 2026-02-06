@@ -23,12 +23,9 @@ struct smooth_media_source {
 	char *url;
 	char *input_format;
 	char *ffmpeg_options;
-	int buffering_mb;
 	bool hw_decode;
 	int reconnect_delay_sec;
-	int64_t jitter_buffer_ms;
-	int64_t max_buffer_ms;
-	bool sync_to_stream;      /* true = pace output to stream clock */
+	bool disable_preview;     /* suppress video in preview/properties */
 
 	/* Decoder */
 	struct stream_decoder *decoder;

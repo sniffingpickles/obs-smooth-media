@@ -9,6 +9,12 @@
 	blog(level, PLUGIN_LOG_PREFIX format, \
 	     obs_source_get_name(s->source), ##__VA_ARGS__)
 
+/* Hardcoded tuning constants — these don't need user-facing sliders.
+ * They've been empirically validated across RTMP/SRT streams. */
+#define NETWORK_BUFFER_MB   2
+#define JITTER_BUFFER_MS    80
+#define MAX_BUFFER_MS       500
+
 /* Forward declarations */
 static void smooth_media_update(void *data, obs_data_t *settings);
 
@@ -191,8 +197,14 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 		frame.color_matrix, frame.color_range_min,
 		frame.color_range_max);
 
-	if (frame.format != VIDEO_FORMAT_NONE)
-		obs_source_output_video(s->source, &frame);
+	if (frame.format != VIDEO_FORMAT_NONE) {
+		/* When disable_preview is on, only output video if the
+		 * source is in the active program output. This saves
+		 * CPU by skipping the properties dialog preview and
+		 * studio-mode preview rendering. */
+		if (!s->disable_preview || obs_source_active(s->source))
+			obs_source_output_video(s->source, &frame);
+	}
 }
 
 static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
@@ -289,7 +301,7 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		double rate = clock_tracker_get_smoothed_rate(&s->clock);
 
 		uint32_t adjusted_sample_rate = buf_frame->sample_rate;
-		if (s->sync_to_stream && fabs(rate - 1.0) > 0.03) {
+		if (fabs(rate - 1.0) > 0.03) {
 			uint32_t raw = (uint32_t)(
 				(double)buf_frame->sample_rate * rate);
 			/* Quantize to nearest 100 Hz for stability */
@@ -328,8 +340,7 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		s->audio_frames_out++;
 
 		/* Diagnostic logging every ~1 second */
-		if (s->sync_to_stream &&
-		    (wall_now - s->last_diag_time) >= 1000000000LL) {
+		if ((wall_now - s->last_diag_time) >= 1000000000LL) {
 			int64_t av_delta = s->audio_out_ts - s->video_out_ts;
 			SM_LOG(LOG_INFO,
 			       "DIAG: rate=%.4f adj_sr=%u drift=%lldms "
@@ -371,7 +382,7 @@ static void *media_thread_func(void *data)
 		.url = s->url,
 		.format_name = s->input_format,
 		.ffmpeg_options = s->ffmpeg_options,
-		.buffering_bytes = s->buffering_mb * 1024 * 1024,
+		.buffering_bytes = NETWORK_BUFFER_MB * 1024 * 1024,
 		.hardware_decoding = s->hw_decode,
 		.opaque = s,
 		.video_cb = on_video_frame,
@@ -396,10 +407,10 @@ static void *media_thread_func(void *data)
 	       s->decoder->has_video ? "yes" : "no",
 	       s->decoder->has_audio ? "yes" : "no");
 	SM_LOG(LOG_INFO,
-	       "Settings: jitter_buf=%lldms, max_buf=%lldms, sync=%s, hw=%s",
-	       (long long)s->jitter_buffer_ms, (long long)s->max_buffer_ms,
-	       s->sync_to_stream ? "on" : "off",
-	       s->hw_decode ? "on" : "off");
+	       "Settings: jitter_buf=%dms, max_buf=%dms, hw=%s, preview=%s",
+	       JITTER_BUFFER_MS, MAX_BUFFER_MS,
+	       s->hw_decode ? "on" : "off",
+	       s->disable_preview ? "off" : "on");
 
 	/* Main decode loop.
 	 * Unlike OBS's built-in media source, we do NOT drive timing here.
@@ -478,9 +489,9 @@ static void start_media(struct smooth_media_source *s)
 	s->active = true;
 	s->kill = false;
 
-	/* Configure jitter buffer */
-	s->audio_buf.min_buffer_ns = s->jitter_buffer_ms * 1000000LL;
-	s->audio_buf.max_buffer_ns = s->max_buffer_ms * 1000000LL;
+	/* Configure jitter buffer (hardcoded — proven values) */
+	s->audio_buf.min_buffer_ns = JITTER_BUFFER_MS * 1000000LL;
+	s->audio_buf.max_buffer_ns = MAX_BUFFER_MS * 1000000LL;
 
 	pthread_mutex_lock(&s->state_mutex);
 	s->state = OBS_MEDIA_STATE_PLAYING;
@@ -562,12 +573,9 @@ static const char *smooth_media_get_name(void *unused)
 
 static void smooth_media_defaults(obs_data_t *settings)
 {
-	obs_data_set_default_int(settings, "buffering_mb", 2);
 	obs_data_set_default_int(settings, "reconnect_delay_sec", 10);
-	obs_data_set_default_int(settings, "jitter_buffer_ms", 80);
-	obs_data_set_default_int(settings, "max_buffer_ms", 500);
-	obs_data_set_default_bool(settings, "sync_to_stream", true);
 	obs_data_set_default_bool(settings, "hw_decode", false);
+	obs_data_set_default_bool(settings, "disable_preview", false);
 }
 
 static obs_properties_t *smooth_media_get_properties(void *data)
@@ -587,31 +595,6 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 
 	obs_property_t *p;
 
-	p = obs_properties_add_int_slider(props, "buffering_mb",
-					  "Network Buffer (MB)",
-					  0, 16, 1);
-	obs_property_int_set_suffix(p, " MB");
-
-	p = obs_properties_add_int_slider(props, "jitter_buffer_ms",
-					  "Audio Jitter Buffer",
-					  0, 500, 10);
-	obs_property_int_set_suffix(p, " ms");
-	obs_property_set_long_description(p,
-		"Audio frames are buffered for this duration before "
-		"playback begins. Higher values = more stutter resistance "
-		"but more latency. 80ms is a good default.");
-
-	p = obs_properties_add_int_slider(props, "max_buffer_ms",
-					  "Max Audio Buffer",
-					  100, 2000, 50);
-	obs_property_int_set_suffix(p, " ms");
-	obs_property_set_long_description(p,
-		"Maximum audio buffer before old frames are dropped. "
-		"Prevents unbounded latency growth.");
-
-	obs_properties_add_bool(props, "sync_to_stream",
-				"Sync to Stream Clock (anti-stutter)");
-
 	p = obs_properties_add_int_slider(props, "reconnect_delay_sec",
 					  "Reconnect Delay",
 					  1, 60, 1);
@@ -619,6 +602,9 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 
 	obs_properties_add_bool(props, "hw_decode",
 				"Hardware Decoding");
+
+	obs_properties_add_bool(props, "disable_preview",
+				"Disable Source Preview (saves CPU)");
 
 	obs_properties_add_text(props, "ffmpeg_options",
 				"FFmpeg Options",
@@ -688,19 +674,12 @@ static void smooth_media_update(void *data, obs_data_t *settings)
 	s->url = url ? bstrdup(url) : NULL;
 	s->input_format = (fmt && *fmt) ? bstrdup(fmt) : NULL;
 	s->ffmpeg_options = (opts && *opts) ? bstrdup(opts) : NULL;
-	s->buffering_mb = (int)obs_data_get_int(settings, "buffering_mb");
 	s->hw_decode = obs_data_get_bool(settings, "hw_decode");
 	s->reconnect_delay_sec = (int)obs_data_get_int(settings, "reconnect_delay_sec");
-	s->jitter_buffer_ms = obs_data_get_int(settings, "jitter_buffer_ms");
-	s->max_buffer_ms = obs_data_get_int(settings, "max_buffer_ms");
-	s->sync_to_stream = obs_data_get_bool(settings, "sync_to_stream");
+	s->disable_preview = obs_data_get_bool(settings, "disable_preview");
 
 	if (s->reconnect_delay_sec < 1)
 		s->reconnect_delay_sec = 10;
-	if (s->jitter_buffer_ms < 0)
-		s->jitter_buffer_ms = 80;
-	if (s->max_buffer_ms < 100)
-		s->max_buffer_ms = 500;
 
 	/* Restart stream with new settings */
 	if (s->url && *s->url) {
