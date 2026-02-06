@@ -2,6 +2,7 @@
 
 #include <util/dstr.h>
 #include <util/platform.h>
+#include <math.h>
 
 #define PLUGIN_LOG_PREFIX "[Smooth Media Source '%s']: "
 #define SM_LOG(level, format, ...) \
@@ -269,19 +270,24 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		 * declared sample rate so OBS plays samples slower,
 		 * matching the stream's actual data production rate.
 		 *
-		 * For example: if stream runs at 0.98x realtime,
-		 * we declare 48000 * 0.98 = 47040 Hz. OBS then plays
-		 * audio at the reduced rate, perfectly matching the
-		 * stream's data production rate. No stutter.
+		 * IMPORTANT: OBS recreates its audio resampler every time
+		 * the declared sample rate changes. If the rate jitters
+		 * frame-to-frame (e.g. 47990→47992→47988), each change
+		 * causes a click at the frame boundary → "crunchy" sound.
 		 *
-		 * We always apply this correction (no deadzone) because
-		 * the EMA smoothing already prevents oscillation. */
+		 * Two safeguards:
+		 * 1. Deadzone: don't adjust if rate is within 0.5% of 1.0
+		 *    (stream is near real-time, no correction needed)
+		 * 2. Quantize: snap to nearest 100 Hz so the value stays
+		 *    stable across frames */
 		double rate = clock_tracker_get_smoothed_rate(&s->clock);
 
 		uint32_t adjusted_sample_rate = buf_frame->sample_rate;
-		if (s->sync_to_stream) {
-			adjusted_sample_rate =
-				(uint32_t)((double)buf_frame->sample_rate * rate);
+		if (s->sync_to_stream && fabs(rate - 1.0) > 0.005) {
+			uint32_t raw = (uint32_t)(
+				(double)buf_frame->sample_rate * rate);
+			/* Quantize to nearest 100 Hz for stability */
+			adjusted_sample_rate = ((raw + 50) / 100) * 100;
 			/* Clamp to sane values */
 			if (adjusted_sample_rate < buf_frame->sample_rate / 2)
 				adjusted_sample_rate = buf_frame->sample_rate / 2;
