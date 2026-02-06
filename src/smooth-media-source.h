@@ -60,6 +60,7 @@ struct smooth_media_source {
 	bool got_first_keyframe;
 	int64_t first_audio_pts;
 	int64_t first_video_pts;
+	uint64_t audio_frames_out;     /* counter for periodic diagnostics */
 
 	/* State */
 	enum obs_media_state state;

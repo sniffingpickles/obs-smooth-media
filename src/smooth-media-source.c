@@ -121,12 +121,13 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	}
 
 	/* Compute output timestamp.
-	 * Instead of mapping stream PTS directly to wall clock (which drifts),
-	 * we use the clock tracker to adjust timestamps to the stream's
-	 * actual pace. */
+	 * When sync_to_stream is enabled, we use wall clock directly.
+	 * The clock tracker measures drift for sample-rate correction,
+	 * but timestamps must stay at wall-clock pace to prevent OBS
+	 * from escalating its audio buffering. */
 	int64_t out_ts;
 	if (s->sync_to_stream) {
-		out_ts = clock_tracker_adjust_timestamp(&s->clock, vf->pts_ns);
+		out_ts = (int64_t)os_gettime_ns();
 	} else {
 		/* Fallback: simple offset from base */
 		out_ts = s->base_ts + (vf->pts_ns - s->first_video_pts);
@@ -224,11 +225,14 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	/* Drain ready frames from the jitter buffer */
 	struct audio_buf_frame *buf_frame;
 	while (audio_buffer_pop(&s->audio_buf, &buf_frame)) {
-		/* Compute output timestamp using clock tracker */
+		/* Compute output timestamp.
+		 * When sync_to_stream is enabled, use wall clock directly.
+		 * This prevents OBS from escalating audio buffering.
+		 * Sample rate correction (below) handles the actual
+		 * pacing to match the stream's data production rate. */
 		int64_t out_ts;
 		if (s->sync_to_stream) {
-			out_ts = clock_tracker_adjust_timestamp(
-				&s->clock, buf_frame->pts_ns);
+			out_ts = (int64_t)os_gettime_ns();
 		} else {
 			int64_t anchor = s->first_audio_pts;
 			out_ts = s->base_ts + (buf_frame->pts_ns - anchor);
@@ -236,18 +240,19 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 
 		/* Rate-adjust: if stream is slow, we slightly reduce the
 		 * declared sample rate so OBS plays samples slower,
-		 * matching the stream's actual pace.
+		 * matching the stream's actual data production rate.
 		 *
 		 * For example: if stream runs at 0.98x realtime,
 		 * we declare 48000 * 0.98 = 47040 Hz. OBS then plays
 		 * audio at the reduced rate, perfectly matching the
-		 * stream's data production rate. No stutter. */
+		 * stream's data production rate. No stutter.
+		 *
+		 * We always apply this correction (no deadzone) because
+		 * the EMA smoothing already prevents oscillation. */
 		double rate = clock_tracker_get_smoothed_rate(&s->clock);
 
-		/* Only apply correction for clearly slow streams.
-		 * Don't adjust if rate is near 1.0 (±0.5%) */
 		uint32_t adjusted_sample_rate = buf_frame->sample_rate;
-		if (s->sync_to_stream && (rate < 0.995 || rate > 1.005)) {
+		if (s->sync_to_stream) {
 			adjusted_sample_rate =
 				(uint32_t)((double)buf_frame->sample_rate * rate);
 			/* Clamp to sane values */
@@ -268,6 +273,16 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		obs_audio.timestamp = out_ts;
 
 		obs_source_output_audio(s->source, &obs_audio);
+
+		s->audio_frames_out++;
+		/* Log rate diagnostics every ~500 frames (~10s at 48kHz/1024) */
+		if (s->sync_to_stream && (s->audio_frames_out % 500) == 0) {
+			SM_LOG(LOG_DEBUG,
+			       "Clock rate=%.4f, adj_sr=%u, drift=%lldms, buf=%lldms",
+			       rate, adjusted_sample_rate,
+			       (long long)(clock_tracker_get_drift(&s->clock) / 1000000),
+			       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000));
+		}
 	}
 }
 
@@ -384,6 +399,7 @@ static void start_media(struct smooth_media_source *s)
 	s->audio_out_ts = 0;
 	s->video_out_ts = 0;
 	s->base_ts = 0;
+	s->audio_frames_out = 0;
 	s->active = true;
 	s->kill = false;
 
