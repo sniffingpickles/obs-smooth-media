@@ -118,6 +118,10 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 		s->first_video = true;
 		s->first_video_pts = vf->pts_ns;
 		s->base_ts = wall_now;
+		SM_LOG(LOG_INFO,
+		       "First video frame: %dx%d fmt=%d pts=%lldms",
+		       vf->width, vf->height, vf->format,
+		       (long long)(vf->pts_ns / 1000000));
 	}
 
 	/* Compute output timestamp.
@@ -205,6 +209,10 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		s->first_audio_pts = af->pts_ns;
 		if (!s->first_video)
 			s->base_ts = wall_now;
+		SM_LOG(LOG_INFO,
+		       "First audio frame: %uHz %uch %u samples pts=%lldms",
+		       af->sample_rate, af->channels, af->frames,
+		       (long long)(af->pts_ns / 1000000));
 	}
 
 	/* Push into the jitter buffer instead of outputting directly.
@@ -214,6 +222,8 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	if (obs_fmt == AUDIO_FORMAT_UNKNOWN)
 		return;
 
+	bool was_primed = audio_buffer_is_ready(&s->audio_buf);
+
 	audio_buffer_push(&s->audio_buf,
 			  (const uint8_t *const *)af->data,
 			  af->data_size, af->frames,
@@ -221,6 +231,23 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 			  (int)obs_fmt,
 			  (int)channels_to_speakers(af->channels),
 			  af->pts_ns);
+
+	/* Log if the buffer had to drop frames (overflow) */
+	if (s->audio_buf.frames_dropped > s->last_drop_count) {
+		uint64_t new_drops = s->audio_buf.frames_dropped - s->last_drop_count;
+		SM_LOG(LOG_WARNING,
+		       "Audio buffer overflow: dropped %llu frame(s) (total dropped: %llu, buffered: %lldms)",
+		       (unsigned long long)new_drops,
+		       (unsigned long long)s->audio_buf.frames_dropped,
+		       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000));
+		s->last_drop_count = s->audio_buf.frames_dropped;
+	}
+
+	if (!was_primed && audio_buffer_is_ready(&s->audio_buf)) {
+		SM_LOG(LOG_INFO,
+		       "Jitter buffer primed (%lldms buffered), starting audio output",
+		       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000));
+	}
 
 	/* Drain ready frames from the jitter buffer */
 	struct audio_buf_frame *buf_frame;
@@ -332,6 +359,11 @@ static void *media_thread_func(void *data)
 	SM_LOG(LOG_INFO, "Stream opened. Video: %s, Audio: %s",
 	       s->decoder->has_video ? "yes" : "no",
 	       s->decoder->has_audio ? "yes" : "no");
+	SM_LOG(LOG_INFO,
+	       "Settings: jitter_buf=%lldms, max_buf=%lldms, sync=%s, hw=%s",
+	       (long long)s->jitter_buffer_ms, (long long)s->max_buffer_ms,
+	       s->sync_to_stream ? "on" : "off",
+	       s->hw_decode ? "on" : "off");
 
 	/* Main decode loop.
 	 * Unlike OBS's built-in media source, we do NOT drive timing here.
@@ -344,7 +376,9 @@ static void *media_thread_func(void *data)
 		}
 	}
 
-	SM_LOG(LOG_INFO, "Media thread stopping.");
+	SM_LOG(LOG_INFO,
+	       "Media thread stopping. Total audio frames out: %llu",
+	       (unsigned long long)s->audio_frames_out);
 
 	stream_decoder_destroy(s->decoder);
 	s->decoder = NULL;
@@ -400,6 +434,7 @@ static void start_media(struct smooth_media_source *s)
 	s->video_out_ts = 0;
 	s->base_ts = 0;
 	s->audio_frames_out = 0;
+	s->last_drop_count = 0;
 	s->active = true;
 	s->kill = false;
 

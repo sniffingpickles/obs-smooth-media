@@ -61,6 +61,7 @@ struct smooth_media_source {
 	int64_t first_audio_pts;
 	int64_t first_video_pts;
 	uint64_t audio_frames_out;     /* counter for periodic diagnostics */
+	uint64_t last_drop_count;      /* for detecting new drops */
 
 	/* State */
 	enum obs_media_state state;
