@@ -1,0 +1,129 @@
+name: Build Windows Plugin
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  OBS_VERSION: "32.0.4"
+  FFMPEG_VERSION: "7.1"
+  PLUGIN_NAME: obs-smooth-media
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Cache dependencies
+        id: cache-deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps/obs-studio
+            deps/obs-source
+            deps/ffmpeg
+          key: deps-obs${{ env.OBS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-v2
+
+      - name: Download OBS Studio (portable)
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path deps -Force | Out-Null
+          $url = "https://github.com/obsproject/obs-studio/releases/download/${{ env.OBS_VERSION }}/OBS-Studio-${{ env.OBS_VERSION }}-Windows.zip"
+          Write-Host "Downloading OBS Studio ${{ env.OBS_VERSION }}..."
+          Invoke-WebRequest -Uri $url -OutFile deps/obs.zip -UseBasicParsing
+          Expand-Archive -Path deps/obs.zip -DestinationPath deps/obs-studio -Force
+          Remove-Item deps/obs.zip
+
+          # Flatten if extracted into a subdirectory
+          $sub = Get-ChildItem deps/obs-studio -Directory | Select-Object -First 1
+          if ($sub -and $sub.Name -ne "bin") {
+            Get-ChildItem $sub.FullName | Move-Item -Destination deps/obs-studio -Force
+            Remove-Item $sub.FullName -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Download OBS source headers
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Write-Host "Cloning OBS source for headers..."
+          git clone --depth 1 --filter=blob:none --sparse `
+            https://github.com/obsproject/obs-studio.git deps/obs-source
+          Push-Location deps/obs-source
+          git sparse-checkout set libobs
+          Pop-Location
+
+      - name: Download FFmpeg dev libraries
+        if: steps.cache-deps.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/GyanD/codexffmpeg/releases/download/${{ env.FFMPEG_VERSION }}/ffmpeg-${{ env.FFMPEG_VERSION }}-full_build-shared.zip"
+          Write-Host "Downloading FFmpeg ${{ env.FFMPEG_VERSION }}..."
+          Invoke-WebRequest -Uri $url -OutFile deps/ffmpeg.zip -UseBasicParsing
+          Expand-Archive -Path deps/ffmpeg.zip -DestinationPath deps/ffmpeg -Force
+          Remove-Item deps/ffmpeg.zip
+
+          # Flatten if extracted into a subdirectory
+          $sub = Get-ChildItem deps/ffmpeg -Directory | Select-Object -First 1
+          if ($sub -and $sub.Name -like "ffmpeg-*") {
+            Get-ChildItem $sub.FullName | Move-Item -Destination deps/ffmpeg -Force
+            Remove-Item $sub.FullName -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: List dependency structure
+        shell: pwsh
+        run: |
+          Write-Host "=== OBS portable ==="
+          Get-ChildItem deps/obs-studio -Recurse -Depth 1 | Select-Object FullName
+          Write-Host ""
+          Write-Host "=== OBS headers ==="
+          Get-ChildItem deps/obs-source/libobs -Depth 0 | Select-Object FullName
+          Write-Host ""
+          Write-Host "=== FFmpeg ==="
+          Get-ChildItem deps/ffmpeg -Depth 1 | Select-Object FullName
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          $obsDir = "${{ github.workspace }}/deps/obs-studio"
+          $obsSrc = "${{ github.workspace }}/deps/obs-source"
+          $ffmpegDir = "${{ github.workspace }}/deps/ffmpeg"
+
+          cmake -B build -G "Visual Studio 17 2022" -A x64 `
+            -DOBS_DIR="$obsDir" `
+            -DOBS_INCLUDE_DIR="$obsSrc/libobs" `
+            -DFFMPEG_DIR="$ffmpegDir"
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Prepare artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifact/obs-plugins/64bit -Force | Out-Null
+          New-Item -ItemType Directory -Path artifact/data/obs-plugins/${{ env.PLUGIN_NAME }} -Force | Out-Null
+
+          # Copy plugin DLL
+          Copy-Item build/Release/${{ env.PLUGIN_NAME }}.dll artifact/obs-plugins/64bit/
+
+          # Copy locale data
+          if (Test-Path data) {
+            Copy-Item -Recurse data/* artifact/data/obs-plugins/${{ env.PLUGIN_NAME }}/
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PLUGIN_NAME }}-windows-x64
+          path: artifact/
+          retention-days: 90
