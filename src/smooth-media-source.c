@@ -14,6 +14,8 @@
 #define NETWORK_BUFFER_MB   2
 #define JITTER_BUFFER_MS    80
 #define MAX_BUFFER_MS       500
+#define SR_WARMUP_NS        (5000000000LL) /* 5s: skip rate correction while clock tracker settles */
+#define SR_HOLD_THRESHOLD   3             /* consecutive out-of-deadzone readings before adjusting */
 
 /* Forward declarations */
 static void smooth_media_update(void *data, obs_data_t *settings);
@@ -286,7 +288,15 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		double rate = clock_tracker_get_smoothed_rate(&s->clock);
 
 		uint32_t adjusted_sample_rate = buf_frame->sample_rate;
-		if (fabs(rate - 1.0) > 0.03) {
+		bool in_warmup = (wall_now - s->stream_start_time) < SR_WARMUP_NS;
+		bool outside_deadzone = fabs(rate - 1.0) > 0.03;
+
+		if (outside_deadzone)
+			s->sr_hold_count++;
+		else
+			s->sr_hold_count = 0;
+
+		if (!in_warmup && s->sr_hold_count >= SR_HOLD_THRESHOLD) {
 			uint32_t raw = (uint32_t)(
 				(double)buf_frame->sample_rate * rate);
 			/* Quantize to nearest 100 Hz for stability */
@@ -471,6 +481,8 @@ static void start_media(struct smooth_media_source *s)
 	s->video_frames_out = 0;
 	s->last_drop_count = 0;
 	s->last_diag_time = 0;
+	s->stream_start_time = (int64_t)os_gettime_ns();
+	s->sr_hold_count = 0;
 	s->active = true;
 	s->kill = false;
 
