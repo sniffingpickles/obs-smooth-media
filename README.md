@@ -1,6 +1,10 @@
 # Smooth Media Source for OBS
 
-A drop-in OBS Studio plugin that eliminates audio stutter and choppy playback when using RTMP, SRT, or RIST live streams as a media source.
+> **Beta Release** — This plugin is actively being developed and tested. It's stable for daily use, but we're still refining things. Feedback and bug reports are welcome!
+
+A drop-in OBS Studio plugin that **fixes audio stutter, choppy playback, and A/V desync** when using RTMP, SRT, or RIST live streams as a media source in OBS Studio. Built for **IRL streamers**, **multi-cam setups**, **remote guest feeds**, and anyone pulling live video into OBS over a network.
+
+**Keywords:** OBS audio stutter fix, OBS SRT audio choppy, OBS RTMP audio desync, OBS media source crackling, OBS live stream audio fix, OBS plugin smooth playback, IRL streaming OBS audio, OBS network stream stutter
 
 ## Why?
 
@@ -113,6 +117,15 @@ src/
 ```
 
 </details>
+
+## Community & Support
+
+This plugin was developed and tested by **[IRLhosting.com](https://irlhosting.com)** with the help of AI.
+
+- **Discord:** [discord.gg/IRLtools](https://discord.gg/IRLtools) — Get help, report bugs, or request features
+- **Website:** [irlhosting.com](https://irlhosting.com) — IRL streaming infrastructure and tools
+
+If this plugin helped you, consider joining the community and sharing your experience!
 
 ## License
 
