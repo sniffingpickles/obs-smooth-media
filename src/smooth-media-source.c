@@ -191,14 +191,8 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 		frame.color_matrix, frame.color_range_min,
 		frame.color_range_max);
 
-	if (frame.format != VIDEO_FORMAT_NONE) {
-		/* When disable_preview is on, only output video if the
-		 * source is in the active program output. This saves
-		 * CPU by skipping the properties dialog preview and
-		 * studio-mode preview rendering. */
-		if (!s->disable_preview || obs_source_active(s->source))
-			obs_source_output_video(s->source, &frame);
-	}
+	if (frame.format != VIDEO_FORMAT_NONE)
+		obs_source_output_video(s->source, &frame);
 }
 
 static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
@@ -405,10 +399,9 @@ static void *media_thread_func(void *data)
 	       s->decoder->has_video ? "yes" : "no",
 	       s->decoder->has_audio ? "yes" : "no");
 	SM_LOG(LOG_INFO,
-	       "Settings: jitter_buf=%dms, max_buf=%dms, hw=%s, preview=%s",
+	       "Settings: jitter_buf=%dms, max_buf=%dms, hw=%s",
 	       JITTER_BUFFER_MS, MAX_BUFFER_MS,
-	       s->hw_decode ? "on" : "off",
-	       s->disable_preview ? "off" : "on");
+	       s->hw_decode ? "on" : "off");
 
 	/* Main decode loop.
 	 * Unlike OBS's built-in media source, we do NOT drive timing here.
@@ -579,7 +572,6 @@ static void smooth_media_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "reconnect_delay_sec", 10);
 	obs_data_set_default_bool(settings, "hw_decode", false);
-	obs_data_set_default_bool(settings, "disable_preview", false);
 }
 
 static obs_properties_t *smooth_media_get_properties(void *data)
@@ -590,7 +582,7 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 	obs_properties_set_flags(props, OBS_PROPERTIES_DEFER_UPDATE);
 
 	obs_properties_add_text(props, "input",
-				"Stream URL (RTMP/SRT/etc.)",
+				"Stream URL (RTMP/SRT/RIST)",
 				OBS_TEXT_DEFAULT);
 
 	obs_properties_add_text(props, "input_format",
@@ -606,9 +598,6 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 
 	obs_properties_add_bool(props, "hw_decode",
 				"Hardware Decoding");
-
-	obs_properties_add_bool(props, "disable_preview",
-				"Disable Source Preview (saves CPU)");
 
 	obs_properties_add_text(props, "ffmpeg_options",
 				"FFmpeg Options",
@@ -680,7 +669,6 @@ static void smooth_media_update(void *data, obs_data_t *settings)
 	s->ffmpeg_options = (opts && *opts) ? bstrdup(opts) : NULL;
 	s->hw_decode = obs_data_get_bool(settings, "hw_decode");
 	s->reconnect_delay_sec = (int)obs_data_get_int(settings, "reconnect_delay_sec");
-	s->disable_preview = obs_data_get_bool(settings, "disable_preview");
 
 	if (s->reconnect_delay_sec < 1)
 		s->reconnect_delay_sec = 10;

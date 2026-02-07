@@ -172,8 +172,17 @@ struct stream_decoder *stream_decoder_create(
 		sd->fmt_ctx->flags |= AVFMT_FLAG_NOBUFFER;
 	}
 
-	/* Set timeout and interrupt for network streams */
-	av_dict_set(&opts, "stimeout", "30000000", 0);
+	/* Set protocol-appropriate timeouts for network streams.
+	 * stimeout is RTMP-specific; SRT and RIST use different options. */
+	if (sd->url) {
+		if (strncmp(sd->url, "rtmp", 4) == 0) {
+			av_dict_set(&opts, "stimeout", "30000000", 0);
+		} else if (strncmp(sd->url, "srt", 3) == 0) {
+			av_dict_set(&opts, "timeout", "30000000", 0);
+		} else if (strncmp(sd->url, "rist", 4) == 0) {
+			av_dict_set(&opts, "timeout", "30000000", 0);
+		}
+	}
 	sd->fmt_ctx->interrupt_callback.callback = interrupt_callback;
 	sd->fmt_ctx->interrupt_callback.opaque = sd;
 

@@ -25,7 +25,6 @@ struct smooth_media_source {
 	char *ffmpeg_options;
 	bool hw_decode;
 	int reconnect_delay_sec;
-	bool disable_preview;     /* suppress video in preview/properties */
 
 	/* Decoder */
 	struct stream_decoder *decoder;
