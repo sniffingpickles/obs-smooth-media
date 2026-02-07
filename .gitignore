@@ -1,5 +1,8 @@
 build/
 build_*/
+deps/
+compiles/
+
 *.o
 *.obj
 *.dll
@@ -8,7 +11,10 @@ build_*/
 *.pdb
 *.lib
 *.exp
+
 .vs/
-CMakeSettings.json
+.vscode/
 .cache/
+CMakeSettings.json
 compile_commands.json
+.DS_Store
