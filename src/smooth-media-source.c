@@ -532,6 +532,13 @@ static void *reconnect_thread_func(void *data)
 
 	SM_LOG(LOG_INFO, "Attempting reconnect...");
 	start_media(s);
+
+	/* Clear reconnecting flag so smooth_media_tick can schedule
+	 * another reconnect if this attempt also fails. */
+	pthread_mutex_lock(&s->reconnect_mutex);
+	s->reconnecting = false;
+	pthread_mutex_unlock(&s->reconnect_mutex);
+
 	return NULL;
 }
 
