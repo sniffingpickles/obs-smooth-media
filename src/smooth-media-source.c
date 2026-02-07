@@ -153,6 +153,15 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 			/* PTS discontinuity — re-anchor to wall clock */
 			s->video_next_ts = wall_now;
 		}
+
+		/* Gentle drift correction: nudge 0.1% toward wall clock
+		 * each frame to prevent encoder/decoder clock difference
+		 * from accumulating A/V drift over long sessions.
+		 * At 60fps this corrects ~6%/sec — a 100ms error takes
+		 * ~17s to converge, with <0.1ms per-frame disturbance. */
+		int64_t drift_error = wall_now - s->video_next_ts;
+		s->video_next_ts += drift_error / 1000;
+
 		out_ts = s->video_next_ts;
 	}
 	s->video_out_ts = out_ts;
