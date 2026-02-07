@@ -55,12 +55,14 @@ struct smooth_media_source {
 	bool got_first_keyframe;
 	int64_t first_audio_pts;
 	int64_t first_video_pts;
+	int64_t prev_video_pts;        /* previous video PTS for delta stepping */
+	int64_t video_next_ts;         /* monotonic video output timestamp */
 	uint64_t audio_frames_out;     /* counter for periodic diagnostics */
 	uint64_t video_frames_out;     /* counter for periodic diagnostics */
 	uint64_t last_drop_count;      /* for detecting new drops */
 	int64_t last_diag_time;        /* wall clock of last diagnostic log */
 	int64_t stream_start_time;     /* wall clock when stream opened */
-	int sr_hold_count;             /* consecutive readings outside deadzone */
+	int64_t sr_hold_start;         /* wall time when rate first left deadzone (0=inside) */
 
 	/* State */
 	enum obs_media_state state;
