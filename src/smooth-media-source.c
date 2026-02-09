@@ -350,8 +350,7 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 
 static void on_stream_stopped(void *opaque)
 {
-	struct smooth_media_source *s = opaque;
-	SM_LOG(LOG_INFO, "Stream ended or disconnected.");
+	(void)opaque;
 }
 
 /* ──────────────────────────────────────────────
@@ -378,7 +377,8 @@ static void *media_thread_func(void *data)
 
 	s->decoder = stream_decoder_create(&info);
 	if (!s->decoder) {
-		SM_LOG(LOG_WARNING, "Failed to open stream: %s", s->url);
+		if (s->reconnect_attempts == 0)
+			SM_LOG(LOG_WARNING, "Failed to open stream: %s", s->url);
 		s->active = false;
 
 		pthread_mutex_lock(&s->state_mutex);
@@ -389,7 +389,12 @@ static void *media_thread_func(void *data)
 		return NULL;
 	}
 
-	SM_LOG(LOG_INFO, "Stream opened: %s", s->url);
+	if (s->reconnect_attempts > 0)
+		SM_LOG(LOG_INFO, "Reconnected after %u attempts: %s",
+		       s->reconnect_attempts, s->url);
+	else
+		SM_LOG(LOG_INFO, "Stream opened: %s", s->url);
+	s->reconnect_attempts = 0;
 
 	/* Main decode loop.
 	 * Unlike OBS's built-in media source, we do NOT drive timing here.
@@ -509,7 +514,10 @@ static void *reconnect_thread_func(void *data)
 	if (ret == 0)
 		return NULL;
 
-	SM_LOG(LOG_INFO, "Attempting reconnect...");
+	s->reconnect_attempts++;
+	if (s->reconnect_attempts == 1 || (s->reconnect_attempts % 10) == 0)
+		SM_LOG(LOG_INFO, "Reconnect attempt #%u...",
+		       s->reconnect_attempts);
 	start_media(s);
 
 	/* Clear reconnecting flag so smooth_media_tick can schedule
@@ -526,8 +534,9 @@ static void schedule_reconnect(struct smooth_media_source *s)
 	pthread_mutex_lock(&s->reconnect_mutex);
 	if (!s->reconnecting) {
 		s->reconnecting = true;
-		SM_LOG(LOG_WARNING, "Stream disconnected. Reconnecting in %d seconds...",
-		       s->reconnect_delay_sec);
+		if (s->reconnect_attempts == 0)
+			SM_LOG(LOG_WARNING, "Stream disconnected. Reconnecting every %d seconds...",
+			       s->reconnect_delay_sec);
 	}
 
 	if (s->reconnect_thread_valid) {

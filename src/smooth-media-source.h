@@ -46,6 +46,7 @@ struct smooth_media_source {
 	bool reconnect_thread_valid;
 	os_event_t *reconnect_stop_event;
 	volatile bool reconnecting;
+	uint32_t reconnect_attempts;   /* suppress repeated failure logs */
 
 	/* Timestamp tracking for output */
 	int64_t audio_out_ts;      /* last audio output timestamp */
