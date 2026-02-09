@@ -154,13 +154,16 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 			s->video_next_ts = wall_now;
 		}
 
-		/* Gentle drift correction: nudge 0.1% toward wall clock
-		 * each frame to prevent encoder/decoder clock difference
-		 * from accumulating A/V drift over long sessions.
-		 * At 60fps this corrects ~6%/sec — a 100ms error takes
-		 * ~17s to converge, with <0.1ms per-frame disturbance. */
+		/* Adaptive drift correction toward wall clock.
+		 * Aggressive (1%) when far to converge quickly after
+		 * initial burst; gentle (0.1%) when close for smooth
+		 * steady-state frame spacing. */
 		int64_t drift_error = wall_now - s->video_next_ts;
-		s->video_next_ts += drift_error / 1000;
+		int64_t abs_drift = drift_error < 0 ? -drift_error : drift_error;
+		if (abs_drift > 100000000LL) /* >100ms */
+			s->video_next_ts += drift_error / 100;
+		else
+			s->video_next_ts += drift_error / 1000;
 
 		out_ts = s->video_next_ts;
 	}
@@ -355,9 +358,15 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 				s->audio_next_ts = wall_now;
 			}
 
-			/* Drift correction: nudge 0.1% toward wall clock */
+			/* Adaptive drift correction toward wall clock.
+			 * 1% when >100ms (fast initial convergence),
+			 * 0.1% when close (smooth steady-state). */
 			int64_t drift_error = wall_now - s->audio_next_ts;
-			s->audio_next_ts += drift_error / 1000;
+			int64_t abs_drift = drift_error < 0 ? -drift_error : drift_error;
+			if (abs_drift > 100000000LL) /* >100ms */
+				s->audio_next_ts += drift_error / 100;
+			else
+				s->audio_next_ts += drift_error / 1000;
 
 			out_ts = s->audio_next_ts;
 		}
