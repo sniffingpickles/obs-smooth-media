@@ -94,6 +94,7 @@ set(PLUGIN_SOURCES
     src/stream-decoder.c
     src/audio-buffer.c
     src/clock-tracker.c
+    src/websocket-api.c
 )
 
 set(PLUGIN_HEADERS
@@ -101,6 +102,8 @@ set(PLUGIN_HEADERS
     src/stream-decoder.h
     src/audio-buffer.h
     src/clock-tracker.h
+    src/websocket-api.h
+    src/obs-websocket-api.h
 )
 
 add_library(${PROJECT_NAME} MODULE ${PLUGIN_SOURCES} ${PLUGIN_HEADERS})

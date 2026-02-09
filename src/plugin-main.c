@@ -1,5 +1,6 @@
 #include <obs-module.h>
 #include "smooth-media-source.h"
+#include "websocket-api.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-smooth-media", "en-US")
@@ -15,6 +16,11 @@ bool obs_module_load(void)
 	blog(LOG_INFO, "[obs-smooth-media] Plugin loaded (v%s)",
 	     "1.2.0");
 	return true;
+}
+
+void obs_module_post_load(void)
+{
+	smooth_media_websocket_init();
 }
 
 void obs_module_unload(void)
