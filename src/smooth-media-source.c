@@ -333,19 +333,34 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 				adjusted_sample_rate = buf_frame->sample_rate * 2;
 		}
 
-		/* Compute output timestamp.
-		 * Use wall clock at the moment we pop from the jitter
-		 * buffer. This keeps timestamps close to os_gettime_ns()
-		 * which OBS needs for proper audio scheduling.
-		 *
-		 * The jitter buffer adds ~80ms of real delay, so audio
-		 * timestamps naturally trail video by the buffer depth.
-		 * OBS handles this easily (max buffering = 960ms).
-		 *
-		 * Previous PTS-based approach kept A/V in relative sync
-		 * but timestamps drifted ~2s ahead of wall time due to
-		 * the initial burst of buffered stream data. */
-		int64_t out_ts = wall_now;
+		/* Compute output timestamp using PTS-delta stepping.
+		 * Same approach as video: advance by exact PTS deltas
+		 * from the encoder for perfectly regular spacing
+		 * (e.g. 23.2ms for 44100Hz/1024 frames), regardless
+		 * of bursty network delivery. First frame anchors to
+		 * wall clock. Drift correction keeps timestamps near
+		 * wall time for OBS audio scheduling. */
+		int64_t out_ts;
+		if (s->audio_frames_out == 0) {
+			out_ts = wall_now;
+			s->audio_next_ts = wall_now;
+			s->prev_audio_pts = buf_frame->pts_ns;
+		} else {
+			int64_t pts_delta = buf_frame->pts_ns - s->prev_audio_pts;
+			s->prev_audio_pts = buf_frame->pts_ns;
+
+			if (pts_delta > 0 && pts_delta < 500000000LL) {
+				s->audio_next_ts += pts_delta;
+			} else {
+				s->audio_next_ts = wall_now;
+			}
+
+			/* Drift correction: nudge 0.1% toward wall clock */
+			int64_t drift_error = wall_now - s->audio_next_ts;
+			s->audio_next_ts += drift_error / 1000;
+
+			out_ts = s->audio_next_ts;
+		}
 		s->audio_out_ts = out_ts;
 
 		struct obs_source_audio obs_audio = {0};
@@ -498,6 +513,8 @@ static void start_media(struct smooth_media_source *s)
 	s->sr_hold_start = 0;
 	s->prev_video_pts = 0;
 	s->video_next_ts = 0;
+	s->prev_audio_pts = 0;
+	s->audio_next_ts = 0;
 	s->active = true;
 	s->kill = false;
 

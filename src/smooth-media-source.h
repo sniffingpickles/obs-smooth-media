@@ -58,6 +58,8 @@ struct smooth_media_source {
 	int64_t first_video_pts;
 	int64_t prev_video_pts;        /* previous video PTS for delta stepping */
 	int64_t video_next_ts;         /* monotonic video output timestamp */
+	int64_t prev_audio_pts;        /* previous audio PTS for delta stepping */
+	int64_t audio_next_ts;         /* monotonic audio output timestamp */
 	uint64_t audio_frames_out;     /* counter for periodic diagnostics */
 	uint64_t video_frames_out;     /* counter for periodic diagnostics */
 	uint64_t last_drop_count;      /* for detecting new drops */
