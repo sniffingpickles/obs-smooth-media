@@ -137,11 +137,16 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	 * we advance timestamps by exact PTS deltas from the encoder.
 	 * This gives perfectly even frame spacing (e.g. exactly
 	 * 16.667ms for 60fps) regardless of when we decode them.
-	 * First frame anchors to wall clock. */
+	 *
+	 * Video is offset forward by the jitter buffer depth so OBS
+	 * holds the frame before displaying it. This compensates for
+	 * the delay audio experiences sitting in the jitter buffer,
+	 * keeping A/V content in sync. */
+	int64_t buf_offset = s->audio_buf.min_buffer_ns;
 	int64_t out_ts;
 	if (s->video_frames_out == 0) {
-		out_ts = wall_now;
-		s->video_next_ts = wall_now;
+		out_ts = wall_now + buf_offset;
+		s->video_next_ts = wall_now + buf_offset;
 		s->prev_video_pts = vf->pts_ns;
 	} else {
 		int64_t pts_delta = vf->pts_ns - s->prev_video_pts;
@@ -150,15 +155,16 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 		if (pts_delta > 0 && pts_delta < 500000000LL) {
 			s->video_next_ts += pts_delta;
 		} else {
-			/* PTS discontinuity — re-anchor to wall clock */
-			s->video_next_ts = wall_now;
+			/* PTS discontinuity — re-anchor */
+			s->video_next_ts = wall_now + buf_offset;
 		}
 
-		/* Adaptive drift correction toward wall clock.
+		/* Adaptive drift correction toward wall + buffer offset.
 		 * Aggressive (1%) when far to converge quickly after
 		 * initial burst; gentle (0.1%) when close for smooth
 		 * steady-state frame spacing. */
-		int64_t drift_error = wall_now - s->video_next_ts;
+		int64_t drift_target = wall_now + buf_offset;
+		int64_t drift_error = drift_target - s->video_next_ts;
 		int64_t abs_drift = drift_error < 0 ? -drift_error : drift_error;
 		if (abs_drift > 100000000LL) /* >100ms */
 			s->video_next_ts += drift_error / 100;
