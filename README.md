@@ -64,6 +64,154 @@ Video frame timestamps use PTS-delta stepping from the encoder for perfectly eve
 
 Any other protocol supported by FFmpeg's `avformat_open_input` should also work.
 
+## WebSocket API
+
+Smooth Media Source integrates with **[obs-websocket](https://github.com/obsproject/obs-websocket)** (included with OBS 28+) so you can control sources remotely — perfect for automated switching, bot integration, or custom dashboards.
+
+All requests use the obs-websocket `CallVendorRequest` with `vendorName: "obs-smooth-media"`.
+
+### SetStreamURL
+
+Update a source's stream URL and automatically reconnect.
+
+```json
+{
+  "requestType": "CallVendorRequest",
+  "requestData": {
+    "vendorName": "obs-smooth-media",
+    "requestType": "SetStreamURL",
+    "requestData": {
+      "sourceName": "Smooth Media Source",
+      "url": "rtmp://server:1935/app/stream"
+    }
+  }
+}
+```
+
+**Response:**
+```json
+{ "success": true, "url": "rtmp://server:1935/app/stream" }
+```
+
+### GetStreamURL
+
+Get the current URL of a source.
+
+```json
+{
+  "requestType": "CallVendorRequest",
+  "requestData": {
+    "vendorName": "obs-smooth-media",
+    "requestType": "GetStreamURL",
+    "requestData": {
+      "sourceName": "Smooth Media Source"
+    }
+  }
+}
+```
+
+**Response:**
+```json
+{ "success": true, "url": "rtmp://server:1935/app/stream" }
+```
+
+### GetStatus
+
+Get playback state, A/V sync offset, and frame counters.
+
+```json
+{
+  "requestType": "CallVendorRequest",
+  "requestData": {
+    "vendorName": "obs-smooth-media",
+    "requestType": "GetStatus",
+    "requestData": {
+      "sourceName": "Smooth Media Source"
+    }
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "state": "playing",
+  "active": true,
+  "reconnecting": false,
+  "url": "rtmp://server:1935/app/stream",
+  "audioFramesOut": 5061,
+  "videoFramesOut": 3196,
+  "avOffsetMs": -2
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `state` | `none`, `playing`, `opening`, `buffering`, `paused`, `stopped`, `ended`, `error` |
+| `active` | Whether the decoder thread is running |
+| `reconnecting` | Whether the source is currently trying to reconnect |
+| `avOffsetMs` | Audio-video timestamp offset in milliseconds (negative = audio behind video) |
+
+### ListSources
+
+Enumerate all Smooth Media Sources in the current scene collection.
+
+```json
+{
+  "requestType": "CallVendorRequest",
+  "requestData": {
+    "vendorName": "obs-smooth-media",
+    "requestType": "ListSources",
+    "requestData": {}
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "sources": [
+    { "name": "Smooth Media Source", "url": "rtmp://server:1935/app/stream" },
+    { "name": "Guest Feed", "url": "srt://server:8282?streamid=play/live/guest" }
+  ]
+}
+```
+
+### Example: Python
+
+```python
+import obsws_python as obs
+
+client = obs.ReqClient(host="localhost", port=4455, password="your_password")
+
+# Switch a source to a new URL
+client.call_vendor_request(
+    "obs-smooth-media",
+    "SetStreamURL",
+    {"sourceName": "Smooth Media Source", "url": "rtmp://new-server:1935/app/stream"}
+)
+```
+
+### Example: JavaScript (obs-websocket-js)
+
+```javascript
+import OBSWebSocket from 'obs-websocket-js';
+
+const obs = new OBSWebSocket();
+await obs.connect('ws://localhost:4455', 'your_password');
+
+await obs.call('CallVendorRequest', {
+  vendorName: 'obs-smooth-media',
+  requestType: 'SetStreamURL',
+  requestData: {
+    sourceName: 'Smooth Media Source',
+    url: 'rtmp://new-server:1935/app/stream'
+  }
+});
+```
+
 ## Building from Source
 
 <details>
@@ -113,7 +261,10 @@ src/
 ├── audio-buffer.c         # Audio jitter buffer
 ├── audio-buffer.h
 ├── clock-tracker.c        # Stream-vs-wall-clock drift measurement
-└── clock-tracker.h
+├── clock-tracker.h
+├── websocket-api.c        # obs-websocket vendor API integration
+├── websocket-api.h
+└── obs-websocket-api.h    # obs-websocket vendor API header (upstream)
 ```
 
 </details>
