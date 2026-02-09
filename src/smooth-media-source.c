@@ -126,6 +126,10 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	if (!s->first_video) {
 		s->first_video = true;
 		s->first_video_pts = vf->pts_ns;
+		SM_LOG(LOG_INFO,
+		       "First video frame: %dx%d fmt=%d pts=%lldms",
+		       vf->width, vf->height, vf->format,
+		       (long long)(vf->pts_ns / 1000000));
 	}
 
 	/* Compute output timestamp using PTS-delta stepping.
@@ -232,6 +236,10 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	if (!s->first_audio) {
 		s->first_audio = true;
 		s->first_audio_pts = af->pts_ns;
+		SM_LOG(LOG_INFO,
+		       "First audio frame: %uHz %uch %u samples pts=%lldms",
+		       af->sample_rate, af->channels, af->frames,
+		       (long long)(af->pts_ns / 1000000));
 	}
 
 	/* Push into the jitter buffer instead of outputting directly.
@@ -241,6 +249,8 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	if (obs_fmt == AUDIO_FORMAT_UNKNOWN)
 		return;
 
+	bool was_primed = audio_buffer_is_ready(&s->audio_buf);
+
 	audio_buffer_push(&s->audio_buf,
 			  (const uint8_t *const *)af->data,
 			  af->data_size, af->frames,
@@ -248,6 +258,12 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 			  (int)obs_fmt,
 			  (int)channels_to_speakers(af->channels),
 			  af->pts_ns);
+
+	if (!was_primed && audio_buffer_is_ready(&s->audio_buf)) {
+		SM_LOG(LOG_INFO,
+		       "Jitter buffer primed (%lldms buffered)",
+		       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000));
+	}
 
 	/* Log if the buffer had to drop frames (overflow) */
 	if (s->audio_buf.frames_dropped > s->last_drop_count) {
@@ -345,6 +361,21 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		obs_source_output_audio(s->source, &obs_audio);
 
 		s->audio_frames_out++;
+
+		/* Diagnostic logging every ~5 seconds */
+		if ((wall_now - s->last_diag_time) >= 5000000000LL) {
+			int64_t av_wall = s->audio_out_ts - s->video_out_ts;
+			SM_LOG(LOG_INFO,
+			       "DIAG: rate=%.4f adj_sr=%u "
+			       "buf=%lldms av_wall=%lldms "
+			       "a_out=%llu v_out=%llu",
+			       rate, adjusted_sample_rate,
+			       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000),
+			       (long long)(av_wall / 1000000),
+			       (unsigned long long)s->audio_frames_out,
+			       (unsigned long long)s->video_frames_out);
+			s->last_diag_time = wall_now;
+		}
 	}
 }
 

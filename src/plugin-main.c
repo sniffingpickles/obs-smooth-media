@@ -13,7 +13,7 @@ bool obs_module_load(void)
 {
 	obs_register_source(&smooth_media_source_info);
 	blog(LOG_INFO, "[obs-smooth-media] Plugin loaded (v%s)",
-	     "1.1.0");
+	     "1.2.0");
 	return true;
 }
 
