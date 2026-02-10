@@ -66,6 +66,7 @@ struct smooth_media_source {
 	int64_t last_diag_time;        /* wall clock of last diagnostic log */
 	int64_t stream_start_time;     /* wall clock when stream opened */
 	int64_t sr_hold_start;         /* wall time when rate first left deadzone (0=inside) */
+	int64_t last_audio_pop_time;   /* wall time of last audio pop (for rate-limiting) */
 
 	/* State */
 	enum obs_media_state state;

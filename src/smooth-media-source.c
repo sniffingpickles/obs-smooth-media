@@ -291,20 +291,23 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		s->last_drop_count = s->audio_buf.frames_dropped;
 	}
 
-	/* Drain ONE frame from the jitter buffer per push.
+	/* Rate-limited drain from the jitter buffer.
 	 *
-	 * Previously this was a `while` loop that drained ALL frames.
-	 * That made the buffer drop to 0 after the initial prime, turning
-	 * it into a pass-through for the rest of the session — no jitter
-	 * absorption at all. Network bursts and decoder stalls passed
-	 * straight through, causing clicks when timestamps fell behind.
-	 *
-	 * With `if` (pop 1 per push), the buffer stays at its primed
-	 * level permanently (e.g. ~4 frames at 80ms). This provides
-	 * ongoing absorption of network jitter and decoder timing
-	 * variations throughout the entire session. */
+	 * Skip the pop if less than 10ms has passed since the last pop.
+	 * This prevents network bursts from passing straight through
+	 * the buffer — during a burst, frames accumulate in the buffer
+	 * (absorbing jitter) and drain at wall-clock pace. Without this,
+	 * the 1:1 push:pop ratio meant bursts of 10+ frames in 5ms
+	 * would dump 200ms of audio into OBS instantly, triggering
+	 * OBS's "adding audio buffering" mechanism. */
+	#define MIN_POP_INTERVAL_NS 10000000LL /* 10ms */
+	if (s->last_audio_pop_time != 0 &&
+	    (wall_now - s->last_audio_pop_time) < MIN_POP_INTERVAL_NS)
+		return;
+
 	struct audio_buf_frame *buf_frame;
 	if (audio_buffer_pop(&s->audio_buf, &buf_frame)) {
+		s->last_audio_pop_time = wall_now;
 		/* Rate-adjust: if stream is slow, we slightly reduce the
 		 * declared sample rate so OBS plays samples slower,
 		 * matching the stream's actual data production rate.
@@ -547,6 +550,7 @@ static void start_media(struct smooth_media_source *s)
 	s->last_diag_time = 0;
 	s->stream_start_time = (int64_t)os_gettime_ns();
 	s->sr_hold_start = 0;
+	s->last_audio_pop_time = 0;
 	s->prev_video_pts = 0;
 	s->video_next_ts = 0;
 	s->prev_audio_pts = 0;
