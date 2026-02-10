@@ -28,9 +28,12 @@ static inline enum video_format av_to_obs_video_format(int f)
 {
 	switch (f) {
 	case AV_PIX_FMT_YUV420P:   return VIDEO_FORMAT_I420;
+	case AV_PIX_FMT_YUVJ420P:  return VIDEO_FORMAT_I420;
 	case AV_PIX_FMT_YUYV422:   return VIDEO_FORMAT_YUY2;
 	case AV_PIX_FMT_YUV422P:   return VIDEO_FORMAT_I422;
+	case AV_PIX_FMT_YUVJ422P:  return VIDEO_FORMAT_I422;
 	case AV_PIX_FMT_YUV444P:   return VIDEO_FORMAT_I444;
+	case AV_PIX_FMT_YUVJ444P:  return VIDEO_FORMAT_I444;
 	case AV_PIX_FMT_UYVY422:   return VIDEO_FORMAT_UYVY;
 	case AV_PIX_FMT_YVYU422:   return VIDEO_FORMAT_YVYU;
 	case AV_PIX_FMT_NV12:      return VIDEO_FORMAT_NV12;
@@ -185,9 +188,13 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	enum video_format obs_fmt = av_to_obs_video_format(vf->format);
 	enum video_colorspace space = av_to_obs_colorspace(
 		vf->colorspace, vf->color_trc, vf->color_primaries);
-	enum video_range_type range = (vf->color_range == AVCOL_RANGE_JPEG)
-					      ? VIDEO_RANGE_FULL
-					      : VIDEO_RANGE_DEFAULT;
+	bool is_yuvj = (vf->format == AV_PIX_FMT_YUVJ420P ||
+			vf->format == AV_PIX_FMT_YUVJ422P ||
+			vf->format == AV_PIX_FMT_YUVJ444P);
+	enum video_range_type range =
+		(vf->color_range == AVCOL_RANGE_JPEG || is_yuvj)
+			? VIDEO_RANGE_FULL
+			: VIDEO_RANGE_DEFAULT;
 
 	for (int i = 0; i < 4; i++) {
 		frame.data[i] = vf->data[i];
