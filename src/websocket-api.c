@@ -180,6 +180,44 @@ static void on_get_status(obs_data_t *request_data, obs_data_t *response_data, v
 }
 
 /* ──────────────────────────────────────────────
+ *  Request: RestartSource
+ *  { "sourceName": "..." }
+ * ────────────────────────────────────────────── */
+
+static void on_restart_source(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	UNUSED_PARAMETER(priv_data);
+
+	const char *source_name = obs_data_get_string(request_data, "sourceName");
+
+	if (!source_name || !*source_name) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error", "Missing 'sourceName' parameter");
+		return;
+	}
+
+	obs_source_t *source = find_smooth_source(source_name);
+	if (!source) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error", "Source not found");
+		return;
+	}
+
+	/* Re-apply current settings to trigger update → start_media.
+	 * This is the equivalent of set_settings({}) on ffmpeg_source —
+	 * it forces a full stop + reconnect cycle. */
+	obs_data_t *settings = obs_source_get_settings(source);
+	obs_source_update(source, settings);
+	obs_data_release(settings);
+	obs_source_release(source);
+
+	blog(LOG_INFO, "[obs-smooth-media] WebSocket: RestartSource '%s'",
+	     source_name);
+
+	obs_data_set_bool(response_data, "success", true);
+}
+
+/* ──────────────────────────────────────────────
  *  Request: ListSources
  *  (no parameters)
  * ────────────────────────────────────────────── */
@@ -239,6 +277,7 @@ void smooth_media_websocket_init(void)
 	ok = obs_websocket_vendor_register_request(vendor, "SetStreamURL", on_set_stream_url, NULL) && ok;
 	ok = obs_websocket_vendor_register_request(vendor, "GetStreamURL", on_get_stream_url, NULL) && ok;
 	ok = obs_websocket_vendor_register_request(vendor, "GetStatus", on_get_status, NULL) && ok;
+	ok = obs_websocket_vendor_register_request(vendor, "RestartSource", on_restart_source, NULL) && ok;
 	ok = obs_websocket_vendor_register_request(vendor, "ListSources", on_list_sources, NULL) && ok;
 
 	if (!ok)
@@ -248,5 +287,6 @@ void smooth_media_websocket_init(void)
 	blog(LOG_INFO, "[obs-smooth-media]   - SetStreamURL");
 	blog(LOG_INFO, "[obs-smooth-media]   - GetStreamURL");
 	blog(LOG_INFO, "[obs-smooth-media]   - GetStatus");
+	blog(LOG_INFO, "[obs-smooth-media]   - RestartSource");
 	blog(LOG_INFO, "[obs-smooth-media]   - ListSources");
 }
