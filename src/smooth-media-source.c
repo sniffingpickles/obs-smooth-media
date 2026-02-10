@@ -42,10 +42,12 @@ static inline enum video_format av_to_obs_video_format(int f)
 	case AV_PIX_FMT_YUVA420P:  return VIDEO_FORMAT_I40A;
 	case AV_PIX_FMT_YUV420P10LE: return VIDEO_FORMAT_I010;
 	case AV_PIX_FMT_YUV422P10LE: return VIDEO_FORMAT_I210;
+	case AV_PIX_FMT_YUV444P10LE: return VIDEO_FORMAT_I412;
 	case AV_PIX_FMT_YUVA422P:  return VIDEO_FORMAT_I42A;
 	case AV_PIX_FMT_YUVA444P:  return VIDEO_FORMAT_YUVA;
 	case AV_PIX_FMT_BGR0:      return VIDEO_FORMAT_BGRX;
 	case AV_PIX_FMT_P010LE:    return VIDEO_FORMAT_P010;
+	case AV_PIX_FMT_GRAY8:     return VIDEO_FORMAT_Y800;
 	default: return VIDEO_FORMAT_NONE;
 	}
 }
