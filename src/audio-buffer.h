@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <util/threading.h>
 
 /*
  * Audio Jitter Buffer — absorbs timing irregularities from live streams.
@@ -36,6 +37,7 @@ struct audio_buf_frame {
 };
 
 struct audio_buffer {
+	pthread_mutex_t mutex;
 	struct audio_buf_frame frames[AUDIO_BUF_MAX_FRAMES];
 	int read_pos;
 	int write_pos;

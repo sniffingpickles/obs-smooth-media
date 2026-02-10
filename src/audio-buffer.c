@@ -20,6 +20,7 @@ static void free_frame_data(struct audio_buf_frame *f)
 void audio_buffer_init(struct audio_buffer *ab)
 {
 	memset(ab, 0, sizeof(*ab));
+	pthread_mutex_init(&ab->mutex, NULL);
 	ab->min_buffer_ns = DEFAULT_MIN_BUFFER_NS;
 	ab->max_buffer_ns = DEFAULT_MAX_BUFFER_NS;
 	ab->last_output_pts = -1;
@@ -27,6 +28,7 @@ void audio_buffer_init(struct audio_buffer *ab)
 
 void audio_buffer_free(struct audio_buffer *ab)
 {
+	pthread_mutex_destroy(&ab->mutex);
 	for (int i = 0; i < AUDIO_BUF_MAX_FRAMES; i++)
 		free_frame_data(&ab->frames[i]);
 	memset(ab, 0, sizeof(*ab));
@@ -66,6 +68,8 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 		       uint32_t sample_rate, uint32_t channels,
 		       int format, int speakers, int64_t pts_ns)
 {
+	pthread_mutex_lock(&ab->mutex);
+
 	/* If buffer is full, drop oldest frame */
 	if (ab->count >= AUDIO_BUF_MAX_FRAMES) {
 		free_frame_data(&ab->frames[ab->read_pos]);
@@ -95,6 +99,7 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 				f->data[i] = malloc(data_sizes[i]);
 				if (!f->data[i]) {
 					f->data_size[i] = 0;
+					pthread_mutex_unlock(&ab->mutex);
 					return false;
 				}
 			}
@@ -130,6 +135,7 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 	if (!ab->primed && ab->total_buffered_ns >= ab->min_buffer_ns)
 		ab->primed = true;
 
+	pthread_mutex_unlock(&ab->mutex);
 	return true;
 }
 
@@ -137,16 +143,24 @@ bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out)
 {
 	*out = NULL;
 
-	if (ab->count == 0)
+	pthread_mutex_lock(&ab->mutex);
+
+	if (ab->count == 0) {
+		pthread_mutex_unlock(&ab->mutex);
 		return false;
+	}
 
 	/* Don't output until primed */
-	if (!ab->primed)
+	if (!ab->primed) {
+		pthread_mutex_unlock(&ab->mutex);
 		return false;
+	}
 
 	struct audio_buf_frame *f = &ab->frames[ab->read_pos];
-	if (!f->valid)
+	if (!f->valid) {
+		pthread_mutex_unlock(&ab->mutex);
 		return false;
+	}
 
 	*out = f;
 
@@ -163,6 +177,7 @@ bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out)
 	 * Un-priming on empty caused a stutter cycle: fill 500ms → burst
 	 * drain → silence while re-filling → repeat every 500ms. */
 
+	pthread_mutex_unlock(&ab->mutex);
 	return true;
 }
 

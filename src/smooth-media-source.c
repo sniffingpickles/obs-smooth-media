@@ -256,8 +256,9 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	}
 
 	/* Push into the jitter buffer instead of outputting directly.
-	 * This is the KEY difference from the built-in media source.
-	 * The jitter buffer absorbs timing irregularities. */
+	 * Audio is drained at a steady pace in smooth_media_tick(),
+	 * which prevents bursty network delivery from causing OBS
+	 * to accumulate audio buffering. */
 	enum audio_format obs_fmt = av_to_obs_audio_format(af->format);
 	if (obs_fmt == AUDIO_FORMAT_UNKNOWN)
 		return;
@@ -287,169 +288,6 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		       (unsigned long long)s->audio_buf.frames_dropped,
 		       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000));
 		s->last_drop_count = s->audio_buf.frames_dropped;
-	}
-
-	/* Drain ONE frame from the jitter buffer per push.
-	 * The buffer stays at its primed level (~4 frames at 80ms),
-	 * providing ongoing absorption of timing jitter. */
-	struct audio_buf_frame *buf_frame;
-	if (audio_buffer_pop(&s->audio_buf, &buf_frame)) {
-		/* Rate-adjust: if stream is slow, we slightly reduce the
-		 * declared sample rate so OBS plays samples slower,
-		 * matching the stream's actual data production rate.
-		 *
-		 * IMPORTANT: OBS recreates its audio resampler every time
-		 * the declared sample rate changes. If the rate jitters
-		 * frame-to-frame (e.g. 47990→47992→47988), each change
-		 * causes a click at the frame boundary → "crunchy" sound.
-		 *
-		 * Two safeguards:
-		 * 1. Deadzone: don't adjust if rate is within 4% of 1.0
-		 *    (network jitter causes ±2-3% oscillation for near-
-		 *    realtime streams — must ignore this noise)
-		 * 2. Quantize: snap to nearest 100 Hz so the value stays
-		 *    stable across frames */
-		double rate = clock_tracker_get_smoothed_rate(&s->clock);
-
-		uint32_t adjusted_sample_rate = buf_frame->sample_rate;
-		bool in_warmup = (wall_now - s->stream_start_time) < SR_WARMUP_NS;
-		bool outside_deadzone = fabs(rate - 1.0) > 0.04;
-
-		if (outside_deadzone) {
-			if (s->sr_hold_start == 0)
-				s->sr_hold_start = wall_now;
-		} else {
-			s->sr_hold_start = 0;
-		}
-
-		bool held_long_enough = s->sr_hold_start != 0 &&
-			(wall_now - s->sr_hold_start) >= SR_HOLD_TIME_NS;
-
-		if (!in_warmup && held_long_enough) {
-			uint32_t raw = (uint32_t)(
-				(double)buf_frame->sample_rate * rate);
-			/* Quantize to nearest 100 Hz for stability */
-			adjusted_sample_rate = ((raw + 50) / 100) * 100;
-			/* Clamp to sane values */
-			if (adjusted_sample_rate < buf_frame->sample_rate / 2)
-				adjusted_sample_rate = buf_frame->sample_rate / 2;
-			if (adjusted_sample_rate > buf_frame->sample_rate * 2)
-				adjusted_sample_rate = buf_frame->sample_rate * 2;
-		}
-
-		/* Compute output timestamp.
-		 * sync_pts ON: PTS-delta stepping toward wall_now with
-		 *   1% drift correction (10× tighter than independent)
-		 *   and a hard clamp at wall_now.  Prevents OBS audio
-		 *   buffering accumulation while keeping av_wall tight.
-		 * sync_pts OFF: independent PTS-delta stepping toward
-		 *   wall clock with 0.1% correction. */
-		int64_t out_ts;
-
-		if (s->sync_pts && s->video_frames_out > 0) {
-			/* Sync-PTS audio: same PTS-delta stepping as
-			 * independent mode but with 10× stronger drift
-			 * correction (1 % vs 0.1 %) and a hard clamp at
-			 * wall_now (never ahead).  This keeps audio
-			 * firmly at wall_now so OBS never accumulates
-			 * audio buffering, while the tighter correction
-			 * keeps av_wall wander to ±5 ms. */
-			if (s->audio_frames_out == 0) {
-				out_ts = wall_now;
-				s->audio_next_ts = wall_now;
-				s->prev_audio_pts = buf_frame->pts_ns;
-			} else {
-				int64_t pts_delta =
-					buf_frame->pts_ns - s->prev_audio_pts;
-				s->prev_audio_pts = buf_frame->pts_ns;
-
-				if (pts_delta > 0 && pts_delta < 500000000LL)
-					s->audio_next_ts += pts_delta;
-				else
-					s->audio_next_ts = wall_now;
-
-				/* Drift correct toward wall_now.
-				 * Asymmetric: 10 % when ahead, 1 % steady
-				 * (10× independent), 1 % when far behind.
-				 * Hard clamp: never ahead of wall_now. */
-				int64_t drift_error =
-					wall_now - s->audio_next_ts;
-				if (drift_error < 0)
-					s->audio_next_ts += drift_error / 10;
-				else if (drift_error > 100000000LL)
-					s->audio_next_ts += drift_error / 100;
-				else
-					s->audio_next_ts += drift_error / 100;
-
-				if (s->audio_next_ts > wall_now)
-					s->audio_next_ts = wall_now;
-
-				out_ts = s->audio_next_ts;
-			}
-		} else if (s->audio_frames_out == 0) {
-			out_ts = wall_now;
-			s->audio_next_ts = wall_now;
-			s->prev_audio_pts = buf_frame->pts_ns;
-		} else {
-			int64_t pts_delta = buf_frame->pts_ns - s->prev_audio_pts;
-			s->prev_audio_pts = buf_frame->pts_ns;
-
-			if (pts_delta > 0 && pts_delta < 500000000LL) {
-				s->audio_next_ts += pts_delta;
-			} else {
-				s->audio_next_ts = wall_now;
-			}
-
-			/* Asymmetric drift correction toward wall clock.
-			 * BEHIND: 1% when >100ms, 0.1% when close.
-			 * AHEAD: aggressive 10% to snap back during
-			 * network bursts. Clamp: never >20ms ahead. */
-			int64_t drift_error = wall_now - s->audio_next_ts;
-			if (drift_error < 0) {
-				s->audio_next_ts += drift_error / 10;
-			} else if (drift_error > 100000000LL) {
-				s->audio_next_ts += drift_error / 100;
-			} else {
-				s->audio_next_ts += drift_error / 1000;
-			}
-
-			int64_t max_ahead = wall_now + 20000000LL;
-			if (s->audio_next_ts > max_ahead)
-				s->audio_next_ts = max_ahead;
-
-			out_ts = s->audio_next_ts;
-		}
-		s->audio_out_ts = out_ts;
-
-		struct obs_source_audio obs_audio = {0};
-		for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++)
-			obs_audio.data[i] = buf_frame->data[i];
-
-		obs_audio.frames = buf_frame->frames;
-		obs_audio.samples_per_sec = adjusted_sample_rate;
-		obs_audio.format = (enum audio_format)buf_frame->format;
-		obs_audio.speakers = (enum speaker_layout)buf_frame->speakers;
-		obs_audio.timestamp = out_ts;
-
-		obs_source_output_audio(s->source, &obs_audio);
-
-		s->audio_frames_out++;
-
-		/* Diagnostic logging every ~5 seconds */
-		if ((wall_now - s->last_diag_time) >= 5000000000LL) {
-			int64_t av_wall = s->audio_out_ts - s->video_out_ts;
-			SM_LOG(LOG_INFO,
-			       "DIAG: rate=%.4f adj_sr=%u "
-			       "buf=%lldms av_wall=%lldms "
-			       "a_out=%llu v_out=%llu%s",
-			       rate, adjusted_sample_rate,
-			       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000),
-			       (long long)(av_wall / 1000000),
-			       (unsigned long long)s->audio_frames_out,
-			       (unsigned long long)s->video_frames_out,
-			       s->sync_pts ? " [PTS-SYNC]" : "");
-			s->last_diag_time = wall_now;
-		}
 	}
 }
 
@@ -571,6 +409,7 @@ static void start_media(struct smooth_media_source *s)
 	s->stream_start_time = (int64_t)os_gettime_ns();
 	s->sr_hold_start = 0;
 	s->last_audio_pop_time = 0;
+	s->audio_frame_dur_ns = 0;
 	s->prev_video_pts = 0;
 	s->video_next_ts = 0;
 	s->prev_audio_pts = 0;
@@ -807,6 +646,242 @@ static void smooth_media_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
 	struct smooth_media_source *s = data;
+
+	/* ── Drain audio from jitter buffer at a steady pace ──
+	 *
+	 * Previously, audio was popped 1:1 with push in on_audio_frame.
+	 * During network bursts many frames arrived in a few ms, all got
+	 * popped and output immediately, and OBS accumulated hundreds of
+	 * ms of audio buffering (which never decreases).
+	 *
+	 * Now: on_audio_frame only pushes.  video_tick (called by OBS at
+	 * render fps, typically 60 Hz) pops at most a few frames per
+	 * call, gated by real elapsed time.  This converts bursty input
+	 * into steady output — OBS never sees a burst of audio. */
+	if (s->active && s->first_audio) {
+		int64_t wall_now = (int64_t)os_gettime_ns();
+		int64_t frame_dur = s->audio_frame_dur_ns;
+		if (frame_dur <= 0)
+			frame_dur = 21333333LL; /* 1024 / 48000 */
+
+		/* Pop up to 3 frames per tick to handle low-fps
+		 * rendering (e.g. 30 fps → 33 ms between ticks,
+		 * need ~1.5 audio frames per tick on average). */
+		int pops = 0;
+		while (pops < 3) {
+			bool should_pop;
+			if (s->last_audio_pop_time == 0) {
+				should_pop = audio_buffer_is_ready(
+					&s->audio_buf);
+			} else {
+				int64_t elapsed = wall_now -
+					s->last_audio_pop_time;
+				should_pop = (elapsed >= frame_dur);
+			}
+			if (!should_pop)
+				break;
+
+			struct audio_buf_frame *buf_frame;
+			if (!audio_buffer_pop(&s->audio_buf, &buf_frame))
+				break;
+
+			/* Update frame duration estimate from actual
+			 * popped frame */
+			if (buf_frame->sample_rate > 0 &&
+			    buf_frame->frames > 0)
+				s->audio_frame_dur_ns =
+					(int64_t)buf_frame->frames *
+					1000000000LL /
+					buf_frame->sample_rate;
+
+			/* Advance pop timer.  First pop anchors to now;
+			 * subsequent pops advance by frame_dur to stay
+			 * in lockstep.  If we fall more than 2 frames
+			 * behind (e.g. after a stall), re-anchor. */
+			if (s->last_audio_pop_time == 0) {
+				s->last_audio_pop_time = wall_now;
+			} else {
+				s->last_audio_pop_time += frame_dur;
+				if (wall_now - s->last_audio_pop_time >
+				    frame_dur * 2)
+					s->last_audio_pop_time =
+						wall_now - frame_dur;
+			}
+
+			/* ── Sample-rate adjustment ── */
+			double rate = clock_tracker_get_smoothed_rate(
+				&s->clock);
+
+			uint32_t adjusted_sample_rate =
+				buf_frame->sample_rate;
+			bool in_warmup =
+				(wall_now - s->stream_start_time) <
+				SR_WARMUP_NS;
+			bool outside_deadzone =
+				fabs(rate - 1.0) > 0.04;
+
+			if (outside_deadzone) {
+				if (s->sr_hold_start == 0)
+					s->sr_hold_start = wall_now;
+			} else {
+				s->sr_hold_start = 0;
+			}
+
+			bool held_long_enough =
+				s->sr_hold_start != 0 &&
+				(wall_now - s->sr_hold_start) >=
+					SR_HOLD_TIME_NS;
+
+			if (!in_warmup && held_long_enough) {
+				uint32_t raw = (uint32_t)(
+					(double)buf_frame->sample_rate *
+					rate);
+				adjusted_sample_rate =
+					((raw + 50) / 100) * 100;
+				if (adjusted_sample_rate <
+				    buf_frame->sample_rate / 2)
+					adjusted_sample_rate =
+						buf_frame->sample_rate /
+						2;
+				if (adjusted_sample_rate >
+				    buf_frame->sample_rate * 2)
+					adjusted_sample_rate =
+						buf_frame->sample_rate *
+						2;
+			}
+
+			/* ── Timestamp computation ──
+			 * sync_pts ON : 1 % drift correction + wall
+			 *   clamp (tighter A/V lock).
+			 * sync_pts OFF: 0.1 % drift correction + 20 ms
+			 *   max-ahead clamp (independent). */
+			int64_t out_ts;
+
+			if (s->sync_pts &&
+			    s->video_frames_out > 0) {
+				if (s->audio_frames_out == 0) {
+					out_ts = wall_now;
+					s->audio_next_ts = wall_now;
+					s->prev_audio_pts =
+						buf_frame->pts_ns;
+				} else {
+					int64_t pts_delta =
+						buf_frame->pts_ns -
+						s->prev_audio_pts;
+					s->prev_audio_pts =
+						buf_frame->pts_ns;
+
+					if (pts_delta > 0 &&
+					    pts_delta < 500000000LL)
+						s->audio_next_ts +=
+							pts_delta;
+					else
+						s->audio_next_ts =
+							wall_now;
+
+					int64_t drift_error =
+						wall_now -
+						s->audio_next_ts;
+					if (drift_error < 0)
+						s->audio_next_ts +=
+							drift_error / 10;
+					else if (drift_error >
+						 100000000LL)
+						s->audio_next_ts +=
+							drift_error / 100;
+					else
+						s->audio_next_ts +=
+							drift_error / 100;
+
+					if (s->audio_next_ts > wall_now)
+						s->audio_next_ts =
+							wall_now;
+
+					out_ts = s->audio_next_ts;
+				}
+			} else if (s->audio_frames_out == 0) {
+				out_ts = wall_now;
+				s->audio_next_ts = wall_now;
+				s->prev_audio_pts =
+					buf_frame->pts_ns;
+			} else {
+				int64_t pts_delta =
+					buf_frame->pts_ns -
+					s->prev_audio_pts;
+				s->prev_audio_pts =
+					buf_frame->pts_ns;
+
+				if (pts_delta > 0 &&
+				    pts_delta < 500000000LL)
+					s->audio_next_ts += pts_delta;
+				else
+					s->audio_next_ts = wall_now;
+
+				int64_t drift_error =
+					wall_now - s->audio_next_ts;
+				if (drift_error < 0)
+					s->audio_next_ts +=
+						drift_error / 10;
+				else if (drift_error > 100000000LL)
+					s->audio_next_ts +=
+						drift_error / 100;
+				else
+					s->audio_next_ts +=
+						drift_error / 1000;
+
+				int64_t max_ahead =
+					wall_now + 20000000LL;
+				if (s->audio_next_ts > max_ahead)
+					s->audio_next_ts = max_ahead;
+
+				out_ts = s->audio_next_ts;
+			}
+			s->audio_out_ts = out_ts;
+
+			/* ── Output to OBS ── */
+			struct obs_source_audio obs_audio = {0};
+			for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++)
+				obs_audio.data[i] = buf_frame->data[i];
+
+			obs_audio.frames = buf_frame->frames;
+			obs_audio.samples_per_sec =
+				adjusted_sample_rate;
+			obs_audio.format =
+				(enum audio_format)buf_frame->format;
+			obs_audio.speakers =
+				(enum speaker_layout)
+					buf_frame->speakers;
+			obs_audio.timestamp = out_ts;
+
+			obs_source_output_audio(s->source, &obs_audio);
+			s->audio_frames_out++;
+			pops++;
+
+			/* ── Diagnostic logging every ~5 s ── */
+			if ((wall_now - s->last_diag_time) >=
+			    5000000000LL) {
+				int64_t av_wall =
+					s->audio_out_ts -
+					s->video_out_ts;
+				SM_LOG(LOG_INFO,
+				       "DIAG: rate=%.4f adj_sr=%u "
+				       "buf=%lldms av_wall=%lldms "
+				       "a_out=%llu v_out=%llu%s",
+				       rate, adjusted_sample_rate,
+				       (long long)(audio_buffer_level_ns(
+							&s->audio_buf) /
+						  1000000),
+				       (long long)(av_wall / 1000000),
+				       (unsigned long long)
+					       s->audio_frames_out,
+				       (unsigned long long)
+					       s->video_frames_out,
+				       s->sync_pts ? " [PTS-SYNC]"
+						   : "");
+				s->last_diag_time = wall_now;
+			}
+		}
+	}
 
 	/* Check if media ended and needs reconnect */
 	if (!s->active && !s->reconnecting && s->url && *s->url &&
