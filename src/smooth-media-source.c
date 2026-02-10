@@ -159,17 +159,23 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 			s->video_next_ts = wall_now + buf_offset;
 		}
 
-		/* Adaptive drift correction toward wall + buffer offset.
-		 * Aggressive (1%) when far to converge quickly after
-		 * initial burst; gentle (0.1%) when close for smooth
-		 * steady-state frame spacing. */
+		/* Asymmetric drift correction toward wall + buffer offset.
+		 * When BEHIND: 1% when >100ms, 0.1% steady-state.
+		 * When AHEAD: aggressive 10% to snap back during
+		 * network bursts. Hard clamp at target + 20ms. */
 		int64_t drift_target = wall_now + buf_offset;
 		int64_t drift_error = drift_target - s->video_next_ts;
-		int64_t abs_drift = drift_error < 0 ? -drift_error : drift_error;
-		if (abs_drift > 100000000LL) /* >100ms */
+		if (drift_error < 0) {
+			s->video_next_ts += drift_error / 10;
+		} else if (drift_error > 100000000LL) {
 			s->video_next_ts += drift_error / 100;
-		else
+		} else {
 			s->video_next_ts += drift_error / 1000;
+		}
+
+		int64_t max_ahead = drift_target + 20000000LL;
+		if (s->video_next_ts > max_ahead)
+			s->video_next_ts = max_ahead;
 
 		out_ts = s->video_next_ts;
 	}
@@ -364,15 +370,30 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 				s->audio_next_ts = wall_now;
 			}
 
-			/* Adaptive drift correction toward wall clock.
-			 * 1% when >100ms (fast initial convergence),
-			 * 0.1% when close (smooth steady-state). */
+			/* Asymmetric drift correction toward wall clock.
+			 * When BEHIND (drift_error > 0): gentle correction
+			 *   1% when >100ms, 0.1% when close.
+			 * When AHEAD (drift_error < 0): aggressive 10%
+			 *   to snap back quickly during network bursts
+			 *   (bursts cause rapid pops that race ahead of
+			 *   wall time, triggering OBS audio buffering).
+			 * Hard clamp: never exceed wall_now + 20ms. */
 			int64_t drift_error = wall_now - s->audio_next_ts;
-			int64_t abs_drift = drift_error < 0 ? -drift_error : drift_error;
-			if (abs_drift > 100000000LL) /* >100ms */
+			if (drift_error < 0) {
+				/* Ahead of wall — burst recovery */
+				s->audio_next_ts += drift_error / 10;
+			} else if (drift_error > 100000000LL) {
+				/* >100ms behind — fast convergence */
 				s->audio_next_ts += drift_error / 100;
-			else
+			} else {
+				/* Close — smooth steady-state */
 				s->audio_next_ts += drift_error / 1000;
+			}
+
+			/* Safety clamp: never more than 20ms ahead */
+			int64_t max_ahead = wall_now + 20000000LL;
+			if (s->audio_next_ts > max_ahead)
+				s->audio_next_ts = max_ahead;
 
 			out_ts = s->audio_next_ts;
 		}
