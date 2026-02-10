@@ -69,10 +69,6 @@ struct smooth_media_source {
 	int64_t sr_hold_start;         /* wall time when rate first left deadzone (0=inside) */
 	int64_t last_audio_pop_time;   /* wall time of last audio pop (for rate-limiting) */
 
-	/* Shared PTS sync (when sync_pts is enabled) */
-	int64_t pts_wall_offset;       /* wall_time - stream_PTS at anchor point */
-	bool pts_wall_offset_set;      /* whether anchor has been established */
-
 	/* State */
 	enum obs_media_state state;
 	pthread_mutex_t state_mutex;

@@ -132,17 +132,10 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 		       (long long)(vf->pts_ns / 1000000));
 	}
 
-	/* Compute output timestamp.
-	 * Two modes controlled by the sync_pts setting:
-	 *
-	 * sync_pts OFF (default): Independent PTS-delta stepping for
-	 * audio and video, each drift-correcting toward wall clock.
-	 * Smooth frame spacing but A/V offset can wander ±30ms.
-	 *
-	 * sync_pts ON: Shared PTS-to-wall anchor. Both audio and video
-	 * derive output timestamps from a single offset, so they're
-	 * always perfectly locked via stream PTS. The offset slowly
-	 * drifts toward wall clock to prevent long-term divergence.
+	/* Compute output timestamp using PTS-delta stepping.
+	 * Video is always the timing master — same logic regardless
+	 * of sync_pts setting. PTS deltas give smooth frame spacing;
+	 * asymmetric drift correction keeps timestamps near wall clock.
 	 *
 	 * Video is offset forward by the jitter buffer depth so OBS
 	 * holds the frame before displaying it. This compensates for
@@ -150,61 +143,39 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	int64_t buf_offset = s->audio_buf.min_buffer_ns;
 	int64_t out_ts;
 
-	if (s->sync_pts) {
-		/* Shared PTS anchor mode */
-		if (!s->pts_wall_offset_set) {
-			s->pts_wall_offset = wall_now - vf->pts_ns;
-			s->pts_wall_offset_set = true;
-		}
-
-		out_ts = vf->pts_ns + s->pts_wall_offset + buf_offset;
-
-		/* Gentle drift correction on the shared offset.
-		 * Asymmetric: 10% when ahead, 0.1% steady-state,
-		 * 1% when far behind. This keeps timestamps near
-		 * wall clock without disturbing A/V alignment. */
-		int64_t ideal_offset = wall_now - vf->pts_ns;
-		int64_t offset_error = ideal_offset - s->pts_wall_offset;
-		if (offset_error < 0) {
-			/* Timestamps ahead of wall — snap back */
-			s->pts_wall_offset += offset_error / 10;
-		} else if (offset_error > 100000000LL) {
-			s->pts_wall_offset += offset_error / 100;
-		} else {
-			s->pts_wall_offset += offset_error / 1000;
-		}
+	if (s->video_frames_out == 0) {
+		out_ts = wall_now + buf_offset;
+		s->video_next_ts = wall_now + buf_offset;
+		s->prev_video_pts = vf->pts_ns;
 	} else {
-		/* Independent PTS-delta stepping mode */
-		if (s->video_frames_out == 0) {
-			out_ts = wall_now + buf_offset;
-			s->video_next_ts = wall_now + buf_offset;
-			s->prev_video_pts = vf->pts_ns;
+		int64_t pts_delta = vf->pts_ns - s->prev_video_pts;
+		s->prev_video_pts = vf->pts_ns;
+
+		if (pts_delta > 0 && pts_delta < 500000000LL) {
+			s->video_next_ts += pts_delta;
 		} else {
-			int64_t pts_delta = vf->pts_ns - s->prev_video_pts;
-			s->prev_video_pts = vf->pts_ns;
-
-			if (pts_delta > 0 && pts_delta < 500000000LL) {
-				s->video_next_ts += pts_delta;
-			} else {
-				s->video_next_ts = wall_now + buf_offset;
-			}
-
-			int64_t drift_target = wall_now + buf_offset;
-			int64_t drift_error = drift_target - s->video_next_ts;
-			if (drift_error < 0) {
-				s->video_next_ts += drift_error / 10;
-			} else if (drift_error > 100000000LL) {
-				s->video_next_ts += drift_error / 100;
-			} else {
-				s->video_next_ts += drift_error / 1000;
-			}
-
-			int64_t max_ahead = drift_target + 20000000LL;
-			if (s->video_next_ts > max_ahead)
-				s->video_next_ts = max_ahead;
-
-			out_ts = s->video_next_ts;
+			s->video_next_ts = wall_now + buf_offset;
 		}
+
+		/* Asymmetric drift correction toward wall + buffer offset.
+		 * BEHIND: 1% when >100ms, 0.1% steady-state.
+		 * AHEAD: aggressive 10% to snap back during bursts.
+		 * Hard clamp at target + 20ms. */
+		int64_t drift_target = wall_now + buf_offset;
+		int64_t drift_error = drift_target - s->video_next_ts;
+		if (drift_error < 0) {
+			s->video_next_ts += drift_error / 10;
+		} else if (drift_error > 100000000LL) {
+			s->video_next_ts += drift_error / 100;
+		} else {
+			s->video_next_ts += drift_error / 1000;
+		}
+
+		int64_t max_ahead = drift_target + 20000000LL;
+		if (s->video_next_ts > max_ahead)
+			s->video_next_ts = max_ahead;
+
+		out_ts = s->video_next_ts;
 	}
 	s->video_out_ts = out_ts;
 	s->video_frames_out++;
@@ -367,20 +338,21 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		}
 
 		/* Compute output timestamp.
-		 * sync_pts ON: use shared anchor (video corrects it).
+		 * sync_pts ON: derive from video's timeline using
+		 *   PTS delta. Audio is locked to video via the
+		 *   encoder's PTS relationship — no independent
+		 *   drift correction, so av_wall is rock-stable.
 		 * sync_pts OFF: independent PTS-delta stepping. */
 		int64_t out_ts;
 
-		if (s->sync_pts) {
-			/* Shared PTS anchor mode — audio uses same
-			 * offset as video (set/corrected in on_video_frame).
-			 * No independent drift correction here — that
-			 * would break the A/V lock. */
-			if (!s->pts_wall_offset_set) {
-				s->pts_wall_offset = wall_now - buf_frame->pts_ns;
-				s->pts_wall_offset_set = true;
-			}
-			out_ts = buf_frame->pts_ns + s->pts_wall_offset;
+		if (s->sync_pts && s->video_frames_out > 0) {
+			/* Audio ts = video's last output ts + PTS delta.
+			 * Since popped audio is ~80ms behind current
+			 * video PTS (due to jitter buffer), the delta
+			 * is negative, placing audio ~80ms before video
+			 * — exactly compensating for the buffer delay. */
+			out_ts = s->video_out_ts +
+				 (buf_frame->pts_ns - s->prev_video_pts);
 		} else if (s->audio_frames_out == 0) {
 			out_ts = wall_now;
 			s->audio_next_ts = wall_now;
@@ -566,8 +538,6 @@ static void start_media(struct smooth_media_source *s)
 	s->stream_start_time = (int64_t)os_gettime_ns();
 	s->sr_hold_start = 0;
 	s->last_audio_pop_time = 0;
-	s->pts_wall_offset = 0;
-	s->pts_wall_offset_set = false;
 	s->prev_video_pts = 0;
 	s->video_next_ts = 0;
 	s->prev_audio_pts = 0;
