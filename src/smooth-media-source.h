@@ -25,6 +25,7 @@ struct smooth_media_source {
 	char *ffmpeg_options;
 	bool hw_decode;
 	bool sync_pts;
+	bool close_when_inactive;
 	int reconnect_delay_sec;
 
 	/* Decoder */

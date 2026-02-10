@@ -530,6 +530,7 @@ static void smooth_media_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "reconnect_delay_sec", 10);
 	obs_data_set_default_bool(settings, "hw_decode", false);
 	obs_data_set_default_bool(settings, "sync_pts", false);
+	obs_data_set_default_bool(settings, "close_when_inactive", true);
 }
 
 static obs_properties_t *smooth_media_get_properties(void *data)
@@ -559,6 +560,9 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 
 	obs_properties_add_bool(props, "sync_pts",
 				"Sync A/V via PTS (experimental)");
+
+	obs_properties_add_bool(props, "close_when_inactive",
+				"Close when inactive (stop when not visible)");
 
 	obs_properties_add_text(props, "ffmpeg_options",
 				"FFmpeg Options",
@@ -630,14 +634,18 @@ static void smooth_media_update(void *data, obs_data_t *settings)
 	s->ffmpeg_options = (opts && *opts) ? bstrdup(opts) : NULL;
 	s->hw_decode = obs_data_get_bool(settings, "hw_decode");
 	s->sync_pts = obs_data_get_bool(settings, "sync_pts");
+	s->close_when_inactive = obs_data_get_bool(settings, "close_when_inactive");
 	s->reconnect_delay_sec = (int)obs_data_get_int(settings, "reconnect_delay_sec");
 
 	if (s->reconnect_delay_sec < 1)
 		s->reconnect_delay_sec = 10;
 
-	/* Restart stream with new settings */
+	/* Restart stream with new settings.
+	 * If close_when_inactive, only start when visible. */
 	if (s->url && *s->url) {
-		start_media(s);
+		if (!s->close_when_inactive ||
+		    obs_source_showing(s->source))
+			start_media(s);
 	} else {
 		stop_media_thread(s);
 	}
@@ -646,13 +654,33 @@ static void smooth_media_update(void *data, obs_data_t *settings)
 static void smooth_media_activate(void *data)
 {
 	struct smooth_media_source *s = data;
-	if (s->url && *s->url && !s->active)
+	if (!s->close_when_inactive && s->url && *s->url && !s->active)
 		start_media(s);
 }
 
 static void smooth_media_deactivate(void *data)
 {
 	struct smooth_media_source *s = data;
+	if (!s->close_when_inactive)
+		return;
+	stop_reconnect_thread(s);
+	stop_media_thread(s);
+	obs_source_output_video(s->source, NULL);
+}
+
+static void smooth_media_show(void *data)
+{
+	struct smooth_media_source *s = data;
+	if (s->close_when_inactive && s->url && *s->url && !s->active)
+		start_media(s);
+}
+
+static void smooth_media_hide(void *data)
+{
+	struct smooth_media_source *s = data;
+	if (!s->close_when_inactive)
+		return;
+	stop_reconnect_thread(s);
 	stop_media_thread(s);
 	obs_source_output_video(s->source, NULL);
 }
@@ -918,8 +946,11 @@ static void smooth_media_tick(void *data, float seconds)
 	}
 
 	/* Check if media ended and needs reconnect */
+	bool should_be_live = s->close_when_inactive
+				      ? obs_source_showing(s->source)
+				      : obs_source_active(s->source);
 	if (!s->active && !s->reconnecting && s->url && *s->url &&
-	    obs_source_active(s->source)) {
+	    should_be_live) {
 		pthread_mutex_lock(&s->state_mutex);
 		bool ended = (s->state == OBS_MEDIA_STATE_ENDED);
 		pthread_mutex_unlock(&s->state_mutex);
@@ -971,6 +1002,8 @@ struct obs_source_info smooth_media_source_info = {
 	.get_properties = smooth_media_get_properties,
 	.activate       = smooth_media_activate,
 	.deactivate     = smooth_media_deactivate,
+	.show           = smooth_media_show,
+	.hide           = smooth_media_hide,
 	.video_tick     = smooth_media_tick,
 	.update         = smooth_media_update,
 	.icon_type      = OBS_ICON_TYPE_MEDIA,
