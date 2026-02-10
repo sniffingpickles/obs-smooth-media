@@ -279,15 +279,28 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000));
 	}
 
-	/* Log if the buffer had to drop frames (overflow) */
+	/* Log if the buffer had to drop frames (overflow).
+	 * Batch log at most once per second to avoid spam during
+	 * initial bursts (which can produce 80+ drops instantly). */
 	if (s->audio_buf.frames_dropped > s->last_drop_count) {
-		uint64_t new_drops = s->audio_buf.frames_dropped - s->last_drop_count;
-		SM_LOG(LOG_WARNING,
-		       "Audio buffer overflow: dropped %llu frame(s) (total dropped: %llu, buffered: %lldms)",
-		       (unsigned long long)new_drops,
-		       (unsigned long long)s->audio_buf.frames_dropped,
-		       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000));
+		s->pending_drop_count +=
+			s->audio_buf.frames_dropped - s->last_drop_count;
 		s->last_drop_count = s->audio_buf.frames_dropped;
+
+		if (wall_now - s->last_overflow_log_time >=
+		    1000000000LL) {
+			SM_LOG(LOG_WARNING,
+			       "Audio buffer overflow: dropped %llu frame(s) "
+			       "(total dropped: %llu, buffered: %lldms)",
+			       (unsigned long long)s->pending_drop_count,
+			       (unsigned long long)
+				       s->audio_buf.frames_dropped,
+			       (long long)(audio_buffer_level_ns(
+						  &s->audio_buf) /
+					  1000000));
+			s->pending_drop_count = 0;
+			s->last_overflow_log_time = wall_now;
+		}
 	}
 }
 
@@ -405,6 +418,8 @@ static void start_media(struct smooth_media_source *s)
 	s->audio_frames_out = 0;
 	s->video_frames_out = 0;
 	s->last_drop_count = 0;
+	s->last_overflow_log_time = 0;
+	s->pending_drop_count = 0;
 	s->last_diag_time = 0;
 	s->stream_start_time = (int64_t)os_gettime_ns();
 	s->sr_hold_start = 0;
@@ -797,6 +812,18 @@ static void smooth_media_tick(void *data, float seconds)
 						s->audio_next_ts =
 							wall_now;
 
+					/* Hard behind-clamp: if we fell
+					 * >200ms behind (e.g. after a
+					 * network stall), snap to now.
+					 * Without this, 1% drift takes
+					 * ~10s to recover and OBS
+					 * accumulates audio buffering
+					 * for every behind-ts frame. */
+					if (s->audio_next_ts <
+					    wall_now - 200000000LL)
+						s->audio_next_ts =
+							wall_now;
+
 					out_ts = s->audio_next_ts;
 				}
 			} else if (s->audio_frames_out == 0) {
@@ -834,6 +861,12 @@ static void smooth_media_tick(void *data, float seconds)
 				if (s->audio_next_ts > max_ahead)
 					s->audio_next_ts = max_ahead;
 
+				/* Hard behind-clamp (same as
+				 * sync_pts path above) */
+				if (s->audio_next_ts <
+				    wall_now - 200000000LL)
+					s->audio_next_ts = wall_now;
+
 				out_ts = s->audio_next_ts;
 			}
 			s->audio_out_ts = out_ts;
@@ -860,9 +893,10 @@ static void smooth_media_tick(void *data, float seconds)
 			/* ── Diagnostic logging every ~5 s ── */
 			if ((wall_now - s->last_diag_time) >=
 			    5000000000LL) {
-				int64_t av_wall =
-					s->audio_out_ts -
-					s->video_out_ts;
+				int64_t av_wall = 0;
+				if (s->video_frames_out > 0)
+					av_wall = s->audio_out_ts -
+						  s->video_out_ts;
 				SM_LOG(LOG_INFO,
 				       "DIAG: rate=%.4f adj_sr=%u "
 				       "buf=%lldms av_wall=%lldms "

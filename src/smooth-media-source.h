@@ -64,6 +64,8 @@ struct smooth_media_source {
 	uint64_t audio_frames_out;     /* counter for periodic diagnostics */
 	uint64_t video_frames_out;     /* counter for periodic diagnostics */
 	uint64_t last_drop_count;      /* for detecting new drops */
+	int64_t last_overflow_log_time; /* wall time of last overflow log */
+	uint64_t pending_drop_count;   /* drops since last overflow log */
 	int64_t last_diag_time;        /* wall clock of last diagnostic log */
 	int64_t stream_start_time;     /* wall clock when stream opened */
 	int64_t sr_hold_start;         /* wall time when rate first left deadzone (0=inside) */
