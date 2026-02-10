@@ -383,6 +383,12 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 				if (s->audio_next_ts > max_ahead)
 					s->audio_next_ts = max_ahead;
 
+				/* Never ahead of wall clock — prevents
+				 * OBS from adding audio buffering during
+				 * the initial burst. */
+				if (s->audio_next_ts > wall_now)
+					s->audio_next_ts = wall_now;
+
 				out_ts = s->audio_next_ts;
 			}
 		} else if (s->audio_frames_out == 0) {
