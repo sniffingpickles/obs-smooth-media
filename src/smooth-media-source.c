@@ -338,20 +338,25 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		}
 
 		/* Compute output timestamp.
-		 * sync_pts ON: PTS-delta stepping, but drift-corrected
-		 *   toward video_out_ts - buf_depth instead of wall_now.
-		 *   This rubber-bands audio to video's timeline, giving
-		 *   av_wall ≈ -buf_depth with near-zero wander.
+		 * sync_pts ON: PTS-delta stepping toward wall_now with
+		 *   1% drift correction (10× tighter than independent)
+		 *   and a hard clamp at wall_now.  Prevents OBS audio
+		 *   buffering accumulation while keeping av_wall tight.
 		 * sync_pts OFF: independent PTS-delta stepping toward
-		 *   wall clock (av_wall can wander ±30ms). */
+		 *   wall clock with 0.1% correction. */
 		int64_t out_ts;
 
 		if (s->sync_pts && s->video_frames_out > 0) {
-			int64_t buf_depth = s->audio_buf.min_buffer_ns;
-
+			/* Sync-PTS audio: same PTS-delta stepping as
+			 * independent mode but with 10× stronger drift
+			 * correction (1 % vs 0.1 %) and a hard clamp at
+			 * wall_now (never ahead).  This keeps audio
+			 * firmly at wall_now so OBS never accumulates
+			 * audio buffering, while the tighter correction
+			 * keeps av_wall wander to ±5 ms. */
 			if (s->audio_frames_out == 0) {
-				out_ts = s->video_out_ts - buf_depth;
-				s->audio_next_ts = out_ts;
+				out_ts = wall_now;
+				s->audio_next_ts = wall_now;
 				s->prev_audio_pts = buf_frame->pts_ns;
 			} else {
 				int64_t pts_delta =
@@ -361,31 +366,21 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 				if (pts_delta > 0 && pts_delta < 500000000LL)
 					s->audio_next_ts += pts_delta;
 				else
-					s->audio_next_ts =
-						s->video_out_ts - buf_depth;
+					s->audio_next_ts = wall_now;
 
-				/* Drift correct toward video timeline.
-				 * Asymmetric: 10% when ahead, 0.1% steady,
-				 * 1% when far behind. Clamp at +20ms. */
-				int64_t drift_target =
-					s->video_out_ts - buf_depth;
+				/* Drift correct toward wall_now.
+				 * Asymmetric: 10 % when ahead, 1 % steady
+				 * (10× independent), 1 % when far behind.
+				 * Hard clamp: never ahead of wall_now. */
 				int64_t drift_error =
-					drift_target - s->audio_next_ts;
+					wall_now - s->audio_next_ts;
 				if (drift_error < 0)
 					s->audio_next_ts += drift_error / 10;
 				else if (drift_error > 100000000LL)
 					s->audio_next_ts += drift_error / 100;
 				else
-					s->audio_next_ts += drift_error / 1000;
+					s->audio_next_ts += drift_error / 100;
 
-				int64_t max_ahead =
-					drift_target + 20000000LL;
-				if (s->audio_next_ts > max_ahead)
-					s->audio_next_ts = max_ahead;
-
-				/* Never ahead of wall clock — prevents
-				 * OBS from adding audio buffering during
-				 * the initial burst. */
 				if (s->audio_next_ts > wall_now)
 					s->audio_next_ts = wall_now;
 
