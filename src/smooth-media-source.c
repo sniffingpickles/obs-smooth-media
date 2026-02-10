@@ -291,23 +291,11 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		s->last_drop_count = s->audio_buf.frames_dropped;
 	}
 
-	/* Rate-limited drain from the jitter buffer.
-	 *
-	 * Skip the pop if less than 10ms has passed since the last pop.
-	 * This prevents network bursts from passing straight through
-	 * the buffer — during a burst, frames accumulate in the buffer
-	 * (absorbing jitter) and drain at wall-clock pace. Without this,
-	 * the 1:1 push:pop ratio meant bursts of 10+ frames in 5ms
-	 * would dump 200ms of audio into OBS instantly, triggering
-	 * OBS's "adding audio buffering" mechanism. */
-	#define MIN_POP_INTERVAL_NS 10000000LL /* 10ms */
-	if (s->last_audio_pop_time != 0 &&
-	    (wall_now - s->last_audio_pop_time) < MIN_POP_INTERVAL_NS)
-		return;
-
+	/* Drain ONE frame from the jitter buffer per push.
+	 * The buffer stays at its primed level (~4 frames at 80ms),
+	 * providing ongoing absorption of timing jitter. */
 	struct audio_buf_frame *buf_frame;
 	if (audio_buffer_pop(&s->audio_buf, &buf_frame)) {
-		s->last_audio_pop_time = wall_now;
 		/* Rate-adjust: if stream is slow, we slightly reduce the
 		 * declared sample rate so OBS plays samples slower,
 		 * matching the stream's actual data production rate.
