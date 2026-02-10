@@ -338,21 +338,53 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		}
 
 		/* Compute output timestamp.
-		 * sync_pts ON: derive from video's timeline using
-		 *   PTS delta. Audio is locked to video via the
-		 *   encoder's PTS relationship — no independent
-		 *   drift correction, so av_wall is rock-stable.
-		 * sync_pts OFF: independent PTS-delta stepping. */
+		 * sync_pts ON: PTS-delta stepping, but drift-corrected
+		 *   toward video_out_ts - buf_depth instead of wall_now.
+		 *   This rubber-bands audio to video's timeline, giving
+		 *   av_wall ≈ -buf_depth with near-zero wander.
+		 * sync_pts OFF: independent PTS-delta stepping toward
+		 *   wall clock (av_wall can wander ±30ms). */
 		int64_t out_ts;
 
 		if (s->sync_pts && s->video_frames_out > 0) {
-			/* Audio ts = video's last output ts + PTS delta.
-			 * Since popped audio is ~80ms behind current
-			 * video PTS (due to jitter buffer), the delta
-			 * is negative, placing audio ~80ms before video
-			 * — exactly compensating for the buffer delay. */
-			out_ts = s->video_out_ts +
-				 (buf_frame->pts_ns - s->prev_video_pts);
+			int64_t buf_depth = s->audio_buf.min_buffer_ns;
+
+			if (s->audio_frames_out == 0) {
+				out_ts = s->video_out_ts - buf_depth;
+				s->audio_next_ts = out_ts;
+				s->prev_audio_pts = buf_frame->pts_ns;
+			} else {
+				int64_t pts_delta =
+					buf_frame->pts_ns - s->prev_audio_pts;
+				s->prev_audio_pts = buf_frame->pts_ns;
+
+				if (pts_delta > 0 && pts_delta < 500000000LL)
+					s->audio_next_ts += pts_delta;
+				else
+					s->audio_next_ts =
+						s->video_out_ts - buf_depth;
+
+				/* Drift correct toward video timeline.
+				 * Asymmetric: 10% when ahead, 0.1% steady,
+				 * 1% when far behind. Clamp at +20ms. */
+				int64_t drift_target =
+					s->video_out_ts - buf_depth;
+				int64_t drift_error =
+					drift_target - s->audio_next_ts;
+				if (drift_error < 0)
+					s->audio_next_ts += drift_error / 10;
+				else if (drift_error > 100000000LL)
+					s->audio_next_ts += drift_error / 100;
+				else
+					s->audio_next_ts += drift_error / 1000;
+
+				int64_t max_ahead =
+					drift_target + 20000000LL;
+				if (s->audio_next_ts > max_ahead)
+					s->audio_next_ts = max_ahead;
+
+				out_ts = s->audio_next_ts;
+			}
 		} else if (s->audio_frames_out == 0) {
 			out_ts = wall_now;
 			s->audio_next_ts = wall_now;
