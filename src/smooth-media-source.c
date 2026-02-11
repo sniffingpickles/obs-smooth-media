@@ -551,9 +551,11 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 
 	/* ── Branded header ── */
 	obs_property_t *hdr = obs_properties_add_text(props, "plugin_info",
-		"<span style='font-size: 13pt; font-weight: 600; "
-		"color: #7c6cff;'>"
-		"\xe2\x9a\xa1 Smooth Media Source</span><br/>"
+		"<a href='https://IRLhosting.com' "
+		"style='font-size: 13pt; font-weight: 600; "
+		"color: #7c6cff; text-decoration: none;'>"
+		"\xe2\x9a\xa1 IRLhosting Smooth Player</a>"
+		"<br/>"
 		"<span style='font-size: 9pt; color: #888888;'>v"
 		SMOOTH_MEDIA_VERSION
 		" &nbsp;\xc2\xb7&nbsp; Low-latency SRT / RTMP / RIST "
