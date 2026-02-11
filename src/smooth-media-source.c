@@ -549,33 +549,83 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 	obs_properties_t *props = obs_properties_create();
 	obs_properties_set_flags(props, OBS_PROPERTIES_DEFER_UPDATE);
 
-	obs_properties_add_text(props, "input",
-				"Stream URL (RTMP/SRT/RIST)",
-				OBS_TEXT_DEFAULT);
+	/* ── Branded header ── */
+	obs_property_t *hdr = obs_properties_add_text(props, "plugin_info",
+		"<span style='font-size: 13pt; font-weight: 600; "
+		"color: #7c6cff;'>"
+		"\xe2\x9a\xa1 Smooth Media Source</span><br/>"
+		"<span style='font-size: 9pt; color: #888888;'>v"
+		SMOOTH_MEDIA_VERSION
+		" &nbsp;\xc2\xb7&nbsp; Low-latency SRT / RTMP / RIST "
+		"playback</span>",
+		OBS_TEXT_INFO);
+	obs_property_text_set_info_type(hdr, OBS_TEXT_INFO_NORMAL);
+	obs_property_text_set_info_word_wrap(hdr, true);
 
-	obs_properties_add_text(props, "input_format",
-				"Input Format (optional)",
-				OBS_TEXT_DEFAULT);
-
+	/* ── Connection ── */
+	obs_properties_t *conn = obs_properties_create();
 	obs_property_t *p;
 
-	p = obs_properties_add_int_slider(props, "reconnect_delay_sec",
-					  "Reconnect Delay",
-					  1, 60, 1);
+	p = obs_properties_add_text(conn, "input",
+				    "Stream URL", OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(p,
+		"Full stream URL including protocol.\n"
+		"Examples:\n"
+		"  srt://host:port?streamid=...\n"
+		"  rtmp://host/app/key\n"
+		"  rist://host:port");
+
+	p = obs_properties_add_text(conn, "input_format",
+				    "Input Format", OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(p,
+		"Force a specific container format (e.g. mpegts).\n"
+		"Leave blank for auto-detection.");
+
+	p = obs_properties_add_int_slider(conn, "reconnect_delay_sec",
+					  "Reconnect Delay", 1, 60, 1);
 	obs_property_int_set_suffix(p, " s");
+	obs_property_set_long_description(p,
+		"Seconds between reconnection attempts when the stream drops.");
 
-	obs_properties_add_bool(props, "hw_decode",
-				"Hardware Decoding");
+	obs_properties_add_group(props, "grp_connection",
+				 "Connection", OBS_GROUP_NORMAL, conn);
 
-	obs_properties_add_bool(props, "sync_pts",
-				"Sync A/V via PTS (experimental)");
+	/* ── Playback ── */
+	obs_properties_t *play = obs_properties_create();
 
-	obs_properties_add_bool(props, "close_when_inactive",
-				"Close when inactive (stop when not visible)");
+	p = obs_properties_add_bool(play, "hw_decode",
+				    "Hardware Decoding");
+	obs_property_set_long_description(p,
+		"Use GPU-accelerated decoding (NVDEC, QSV, VAAPI).\n"
+		"Reduces CPU load but may not support all codecs.");
 
-	obs_properties_add_text(props, "ffmpeg_options",
-				"FFmpeg Options",
-				OBS_TEXT_DEFAULT);
+	p = obs_properties_add_bool(play, "sync_pts",
+				    "Sync A/V via PTS");
+	obs_property_set_long_description(p,
+		"Use presentation timestamps for audio-video sync.\n"
+		"May help streams with inconsistent frame timing.");
+
+	p = obs_properties_add_bool(play, "close_when_inactive",
+				    "Close When Inactive");
+	obs_property_set_long_description(p,
+		"Stop playback and disconnect when the source is\n"
+		"hidden or on another scene. Saves CPU, bandwidth,\n"
+		"and server resources.");
+
+	obs_properties_add_group(props, "grp_playback",
+				 "Playback", OBS_GROUP_NORMAL, play);
+
+	/* ── Advanced ── */
+	obs_properties_t *adv = obs_properties_create();
+
+	p = obs_properties_add_text(adv, "ffmpeg_options",
+				    "FFmpeg Options", OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(p,
+		"Extra FFmpeg demuxer/decoder options.\n"
+		"Example: analyzeduration=2000000 probesize=5000000");
+
+	obs_properties_add_group(props, "grp_advanced",
+				 "Advanced", OBS_GROUP_NORMAL, adv);
 
 	return props;
 }
