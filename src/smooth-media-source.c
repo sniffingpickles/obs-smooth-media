@@ -123,9 +123,14 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 		s->got_first_keyframe = true;
 	}
 
-	/* Record PTS for clock tracking */
+	/* NOTE: we intentionally do NOT feed video PTS into the clock
+	 * tracker.  Video decoding is susceptible to GPU-contention
+	 * bursts (e.g. when multiple NVENC sessions are running),
+	 * which cause many frames to be decoded in quick succession.
+	 * This makes stream_elapsed >> wall_elapsed and poisons the
+	 * rate measurement.  Audio from the network is a far more
+	 * reliable clock source. */
 	int64_t wall_now = (int64_t)os_gettime_ns();
-	clock_tracker_record(&s->clock, vf->pts_ns, wall_now);
 
 	/* Set anchor on first video */
 	if (!s->first_video) {
@@ -835,16 +840,19 @@ static void smooth_media_tick(void *data, float seconds)
 					rate);
 				adjusted_sample_rate =
 					((raw + 50) / 100) * 100;
-				if (adjusted_sample_rate <
-				    buf_frame->sample_rate / 2)
-					adjusted_sample_rate =
-						buf_frame->sample_rate /
-						2;
-				if (adjusted_sample_rate >
-				    buf_frame->sample_rate * 2)
-					adjusted_sample_rate =
-						buf_frame->sample_rate *
-						2;
+				/* Clamp to ±5 %.  Real clock drift is
+				 * tiny; anything larger is a transient
+				 * measurement artifact. */
+				uint32_t sr_min =
+					(uint32_t)(buf_frame->sample_rate *
+						   0.95);
+				uint32_t sr_max =
+					(uint32_t)(buf_frame->sample_rate *
+						   1.05);
+				if (adjusted_sample_rate < sr_min)
+					adjusted_sample_rate = sr_min;
+				if (adjusted_sample_rate > sr_max)
+					adjusted_sample_rate = sr_max;
 			}
 
 			/* ── Timestamp computation ──

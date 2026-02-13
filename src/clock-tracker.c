@@ -73,11 +73,14 @@ void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns,
 			ct->stream_rate =
 				(double)stream_elapsed / (double)wall_elapsed;
 
-			/* Clamp to sane range */
-			if (ct->stream_rate < 0.5)
-				ct->stream_rate = 0.5;
-			if (ct->stream_rate > 2.0)
-				ct->stream_rate = 2.0;
+			/* Clamp to sane range.  Real clock drift is
+			 * never more than a fraction of a percent;
+			 * anything beyond ±10 % is a transient burst
+			 * from bursty network / decoder delivery. */
+			if (ct->stream_rate < 0.90)
+				ct->stream_rate = 0.90;
+			if (ct->stream_rate > 1.10)
+				ct->stream_rate = 1.10;
 
 			/* Update EMA */
 			ct->smoothed_rate =
@@ -131,10 +134,10 @@ int64_t clock_tracker_adjust_timestamp(struct clock_tracker *ct,
 	 * 1/0.98 = 1.02x wall time spacing, which means OBS will
 	 * play it back slower to match the stream pace */
 	double rate = ct->smoothed_rate;
-	if (rate < 0.5)
-		rate = 0.5;
-	if (rate > 2.0)
-		rate = 2.0;
+	if (rate < 0.90)
+		rate = 0.90;
+	if (rate > 1.10)
+		rate = 1.10;
 
 	int64_t adjusted_offset = (int64_t)((double)stream_offset / rate);
 	return ct->anchor_wall_ns + adjusted_offset;
