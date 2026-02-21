@@ -15,7 +15,7 @@
 #define JITTER_BUFFER_MS    80
 #define MAX_BUFFER_MS       500
 #define SR_WARMUP_NS        (5000000000LL) /* 5s: skip rate correction while clock tracker settles */
-#define BUF_SR_GAIN         0.01           /* SR correction per second of buffer excess: 0.1% per 100ms */
+#define SR_HOLD_TIME_NS     (3000000000LL) /* 3s: rate must stay outside deadzone this long before adjusting */
 
 /* Forward declarations */
 static void smooth_media_update(void *data, obs_data_t *settings);
@@ -436,6 +436,7 @@ static void start_media(struct smooth_media_source *s)
 	s->pending_drop_count = 0;
 	s->last_diag_time = 0;
 	s->stream_start_time = (int64_t)os_gettime_ns();
+	s->sr_hold_start = 0;
 	s->last_audio_pop_time = 0;
 	s->audio_frame_dur_ns = 0;
 	s->prev_video_pts = 0;
@@ -818,29 +819,30 @@ static void smooth_media_tick(void *data, float seconds)
 			bool in_warmup =
 				(wall_now - s->stream_start_time) <
 				SR_WARMUP_NS;
+			bool outside_deadzone =
+				fabs(rate - 1.0) > 0.04;
 
-			if (!in_warmup) {
-				/* Buffer-level proportional correction.
-				 * Speed up output when buffer exceeds
-				 * target, slow down when below.  This
-				 * keeps the jitter buffer near its
-				 * configured depth instead of drifting
-				 * to max after the initial burst. */
-				int64_t buf_level =
-					audio_buffer_level_ns(
-						&s->audio_buf);
-				int64_t buf_target =
-					s->audio_buf.min_buffer_ns;
-				double buf_err_s =
-					(double)(buf_level - buf_target) /
-					1e9;
+			if (outside_deadzone) {
+				if (s->sr_hold_start == 0)
+					s->sr_hold_start = wall_now;
+			} else {
+				s->sr_hold_start = 0;
+			}
 
-				double correction =
-					rate + buf_err_s * BUF_SR_GAIN;
+			bool held_long_enough =
+				s->sr_hold_start != 0 &&
+				(wall_now - s->sr_hold_start) >=
+					SR_HOLD_TIME_NS;
 
-				adjusted_sample_rate = (uint32_t)(
+			if (!in_warmup && held_long_enough) {
+				uint32_t raw = (uint32_t)(
 					(double)buf_frame->sample_rate *
-					correction + 0.5);
+					rate);
+				adjusted_sample_rate =
+					((raw + 50) / 100) * 100;
+				/* Clamp to ±5 %.  Real clock drift is
+				 * tiny; anything larger is a transient
+				 * measurement artifact. */
 				uint32_t sr_min =
 					(uint32_t)(buf_frame->sample_rate *
 						   0.95);
