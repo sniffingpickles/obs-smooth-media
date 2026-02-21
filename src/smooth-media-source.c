@@ -15,7 +15,7 @@
 #define JITTER_BUFFER_MS    80
 #define MAX_BUFFER_MS       500
 #define SR_WARMUP_NS        (5000000000LL) /* 5s: skip rate correction while clock tracker settles */
-#define BUF_SR_GAIN         0.05           /* SR correction per second of buffer excess: 0.5% per 100ms */
+#define BUF_SR_GAIN         0.01           /* SR correction per second of buffer excess: 0.1% per 100ms */
 
 /* Forward declarations */
 static void smooth_media_update(void *data, obs_data_t *settings);
@@ -838,11 +838,9 @@ static void smooth_media_tick(void *data, float seconds)
 				double correction =
 					rate + buf_err_s * BUF_SR_GAIN;
 
-				uint32_t raw = (uint32_t)(
+				adjusted_sample_rate = (uint32_t)(
 					(double)buf_frame->sample_rate *
-					correction);
-				adjusted_sample_rate =
-					((raw + 50) / 100) * 100;
+					correction + 0.5);
 				uint32_t sr_min =
 					(uint32_t)(buf_frame->sample_rate *
 						   0.95);
