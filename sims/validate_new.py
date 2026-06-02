@@ -154,6 +154,7 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1,
     last_sr_change = 0
     clock_skip_until = CLOCK_SETTLE
     last_arrival = 0
+    did_trim = False
     declared_sr = 0
     sr_changes = 0          # each = an OBS resampler reset = a click
     sr_changes_steady = 0   # changes after warmup+2s
@@ -179,6 +180,10 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1,
             buf.push(pts, t)
 
         if buf.primed or frames_out > 0:
+            if not did_trim and t >= clock_skip_until and buf.primed:
+                while buf.q and buf.level > buf.target:
+                    buf.q.pop(0); buf.level -= FRAME_DUR; buf.dropped += 1
+                did_trim = True
             rate_c = max(0.90, min(1.10, clk.smoothed))
             lvl_err = 0.0
             if buf.target > 0:

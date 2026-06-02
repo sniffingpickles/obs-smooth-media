@@ -3,6 +3,7 @@ name: Build Windows Plugin
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -11,10 +12,14 @@ env:
   OBS_VERSION: "32.0.4"
   FFMPEG_VERSION: "7.1"
   PLUGIN_NAME: obs-smooth-media
+  # Opt JS actions into Node 24 ahead of GitHub's forced cutover.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: write   # allow creating a Release on tag builds
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -209,3 +214,15 @@ jobs:
           name: ${{ env.PLUGIN_NAME }}-windows-x64
           path: artifact/
           retention-days: 90
+
+      - name: Publish release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = "${{ env.PLUGIN_NAME }}-${{ github.ref_name }}-windows-x64.zip"
+          Compress-Archive -Path artifact/* -DestinationPath $zip -Force
+          gh release create "${{ github.ref_name }}" $zip `
+            --title "${{ github.ref_name }}" `
+            --generate-notes

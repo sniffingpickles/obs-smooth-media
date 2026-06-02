@@ -470,6 +470,7 @@ static void start_media(struct smooth_media_source *s)
 	s->stream_start_time = (int64_t)os_gettime_ns();
 	s->clock_skip_until_ns = s->stream_start_time + CLOCK_SETTLE_NS;
 	s->last_audio_arrival_ns = 0;
+	s->did_initial_trim = false;
 	s->sr_ratio = 1.0;
 	s->sr_slow_rate = 1.0;
 	s->declared_sr = 0;
@@ -872,6 +873,24 @@ static void smooth_media_tick(void *data, float seconds)
 			rate = 0.90;
 		if (rate > 1.10)
 			rate = 1.10;
+
+		/* One-shot: once the connect burst has settled, discard its
+		 * stale backlog down to target so we start near live with the
+		 * full jitter margin available — otherwise the burst leaves the
+		 * buffer pinned near max (≈300ms) for the whole session. */
+		if (!s->did_initial_trim &&
+		    wall_now >= s->clock_skip_until_ns &&
+		    audio_buffer_is_ready(&s->audio_buf)) {
+			int64_t before = audio_buffer_level_ns(&s->audio_buf);
+			audio_buffer_trim_to_target(&s->audio_buf);
+			s->did_initial_trim = true;
+			if (s->debug_logging)
+				SM_LOG(LOG_INFO,
+				       "DBG initial trim: %lldms -> %lldms",
+				       (long long)(before / 1000000),
+				       (long long)(audio_buffer_level_ns(
+						&s->audio_buf) / 1000000));
+		}
 
 		/* ── Closed-loop drain pacing ──
 		 * Pop cadence is paced to the stream's TRUE delivery rate, so

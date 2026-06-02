@@ -95,6 +95,11 @@ bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out);
  * adaptive cushion so playback rebuilds a deeper buffer after a stall. */
 void audio_buffer_note_underrun(struct audio_buffer *ab);
 
+/* Drop oldest frames until the level is back at the adaptive target. Used once
+ * after the connect burst to discard the server's stale backlog and start near
+ * live, instead of carrying that backlog as permanent latency. */
+void audio_buffer_trim_to_target(struct audio_buffer *ab);
+
 /* Get current buffer level in nanoseconds */
 int64_t audio_buffer_level_ns(const struct audio_buffer *ab);
 

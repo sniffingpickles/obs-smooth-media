@@ -206,6 +206,24 @@ void audio_buffer_note_underrun(struct audio_buffer *ab)
 	pthread_mutex_unlock(&ab->mutex);
 }
 
+void audio_buffer_trim_to_target(struct audio_buffer *ab)
+{
+	pthread_mutex_lock(&ab->mutex);
+	while (ab->count > 0 &&
+	       ab->total_buffered_ns > ab->target_buffer_ns) {
+		struct audio_buf_frame *f = &ab->frames[ab->read_pos];
+		ab->total_buffered_ns -=
+			frame_duration_ns(f->frames, f->sample_rate);
+		free_frame_data(f);
+		ab->read_pos = (ab->read_pos + 1) % AUDIO_BUF_MAX_FRAMES;
+		ab->count--;
+		ab->frames_dropped++;
+	}
+	if (ab->total_buffered_ns < 0)
+		ab->total_buffered_ns = 0;
+	pthread_mutex_unlock(&ab->mutex);
+}
+
 bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out)
 {
 	*out = NULL;
