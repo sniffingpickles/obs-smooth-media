@@ -1,6 +1,6 @@
 #pragma once
 
-#define SMOOTH_MEDIA_VERSION "1.4.6"
+#define SMOOTH_MEDIA_VERSION "1.4.7"
 
 #include <obs-module.h>
 #include <util/threading.h>
@@ -79,6 +79,7 @@ struct smooth_media_source {
 	int64_t last_audio_arrival_ns; /* wall time of previous audio frame (stall/burst detection) */
 	int64_t last_audio_pts_ns;     /* PTS of previous audio frame (delivery-rate estimate) */
 	double deliv_ema;              /* smoothed instantaneous delivery rate (pts/wall); ~1 steady, >1 catch-up burst, <1 stall */
+	int64_t overfill_since_ns;     /* wall time the buffer first went well above target (0 = at/near target) */
 	bool did_initial_trim;         /* one-shot: trim the connect burst backlog to target */
 	double sr_ratio;               /* slew-limited declared-sample-rate ratio (1.0 = no correction) */
 	double sr_slow_rate;           /* heavily-smoothed drift estimate that drives the declared rate */

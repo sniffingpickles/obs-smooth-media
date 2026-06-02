@@ -156,6 +156,7 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1,
     last_arrival = 0
     last_apts = 0
     deliv_ema = 1.0
+    overfill_since = 0
     did_trim = False
     declared_sr = 0
     sr_changes = 0          # each = an OBS resampler reset = a click
@@ -182,8 +183,15 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1,
                     deliv_ema += 0.1 * (inst - deliv_ema)
                 if d_arr > STALL_GAP:
                     clock_skip_until = a + CLOCK_SETTLE
+                    did_trim = False   # re-trim to live after the stall
             last_arrival = a; last_apts = pts
-            steady = 0.85 < deliv_ema < 1.15
+            if buf.level > buf.target + 150 * NS // 1000:
+                if overfill_since == 0:
+                    overfill_since = a
+            else:
+                overfill_since = 0
+            sustained_overfill = overfill_since != 0 and (a - overfill_since) > 2 * NS
+            steady = 0.85 < deliv_ema < 1.15 and not sustained_overfill
             if ((not settle) or a >= clock_skip_until) and steady:
                 clk.record(pts, a)
             buf.push(pts, a)

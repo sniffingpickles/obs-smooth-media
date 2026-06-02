@@ -294,17 +294,44 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 				inst = 3.0;
 			s->deliv_ema += 0.1 * (inst - s->deliv_ema);
 		}
-		if (d_arr > STALL_GAP_NS)
+		if (d_arr > STALL_GAP_NS) {
 			s->clock_skip_until_ns = wall_now + CLOCK_SETTLE_NS;
+			/* Re-arm the trim: once the post-stall catch-up settles,
+			 * drop the stale backlog back to target — jump to live
+			 * and restore the jitter headroom instead of carrying
+			 * the missed audio as permanent latency. */
+			s->did_initial_trim = false;
+		}
 	}
 	s->last_audio_arrival_ns = wall_now;
 	s->last_audio_pts_ns = af->pts_ns;
 
-	/* Only feed the rate estimator with steady-state delivery. Skipping
-	 * catch-up bursts and stalls keeps them out of the measurement window
-	 * entirely, so the rate holds its true value instead of spiking — which
-	 * previously caused over-drain underruns and a sample-rate wobble. */
-	bool steady = s->deliv_ema > 0.85 && s->deliv_ema < 1.15;
+	/* Only feed the rate estimator with steady-state delivery. Two tells of
+	 * a transient (catch-up burst or stall) that must NOT bias the rate:
+	 *   - delivery rate far from realtime (sharp burst/stall), and
+	 *   - the buffer sitting well above target, which means we're refilling
+	 *     after a dropout (a mild ~2% catch-up looks like steady delivery
+	 *     but the buffer is way over target). A true clock offset keeps the
+	 *     buffer AT target, so this only excludes recoveries.
+	 * Holding the rate steady through these prevents over-drain underruns
+	 * and the post-stall sample-rate drift/clicks. */
+	int64_t buf_level = audio_buffer_level_ns(&s->audio_buf);
+	int64_t buf_target = audio_buffer_target_ns(&s->audio_buf);
+	if (buf_level > buf_target + 150000000LL) {
+		if (s->overfill_since_ns == 0)
+			s->overfill_since_ns = wall_now;
+	} else {
+		s->overfill_since_ns = 0;
+	}
+	/* Sustained (not transient) overfill means we're refilling after a
+	 * dropout — a mild catch-up that would otherwise bias the rate. A
+	 * brief jitter spike pushing the buffer up is normal and still counts
+	 * as steady. */
+	bool sustained_overfill =
+		s->overfill_since_ns != 0 &&
+		(wall_now - s->overfill_since_ns) > 2000000000LL;
+	bool steady = s->deliv_ema > 0.85 && s->deliv_ema < 1.15 &&
+		      !sustained_overfill;
 	if (wall_now >= s->clock_skip_until_ns && steady)
 		clock_tracker_record(&s->clock, af->pts_ns, wall_now);
 
@@ -492,6 +519,7 @@ static void start_media(struct smooth_media_source *s)
 	s->last_audio_arrival_ns = 0;
 	s->last_audio_pts_ns = 0;
 	s->deliv_ema = 1.0;
+	s->overfill_since_ns = 0;
 	s->did_initial_trim = false;
 	s->sr_ratio = 1.0;
 	s->sr_slow_rate = 1.0;
