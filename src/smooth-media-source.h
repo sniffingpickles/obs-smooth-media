@@ -1,6 +1,6 @@
 #pragma once
 
-#define SMOOTH_MEDIA_VERSION "1.4.5"
+#define SMOOTH_MEDIA_VERSION "1.4.6"
 
 #include <obs-module.h>
 #include <util/threading.h>
@@ -76,7 +76,9 @@ struct smooth_media_source {
 	int64_t last_underrun_log_time; /* rate-limit for debug underrun logs */
 	int64_t stream_start_time;     /* wall clock when stream opened */
 	int64_t clock_skip_until_ns;   /* skip rate measurement until this wall time (connect/stall settle) */
-	int64_t last_audio_arrival_ns; /* wall time of previous audio frame (stall detection) */
+	int64_t last_audio_arrival_ns; /* wall time of previous audio frame (stall/burst detection) */
+	int64_t last_audio_pts_ns;     /* PTS of previous audio frame (delivery-rate estimate) */
+	double deliv_ema;              /* smoothed instantaneous delivery rate (pts/wall); ~1 steady, >1 catch-up burst, <1 stall */
 	bool did_initial_trim;         /* one-shot: trim the connect burst backlog to target */
 	double sr_ratio;               /* slew-limited declared-sample-rate ratio (1.0 = no correction) */
 	double sr_slow_rate;           /* heavily-smoothed drift estimate that drives the declared rate */

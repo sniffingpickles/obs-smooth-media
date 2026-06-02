@@ -280,12 +280,32 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	 * its catch-up burst are skipped; the rate simply holds its last-good
 	 * value through the disruption. */
 	int64_t wall_now = (int64_t)os_gettime_ns();
-	if (s->last_audio_arrival_ns != 0 &&
-	    wall_now - s->last_audio_arrival_ns > STALL_GAP_NS)
-		s->clock_skip_until_ns = wall_now + CLOCK_SETTLE_NS;
-	s->last_audio_arrival_ns = wall_now;
 
-	if (wall_now >= s->clock_skip_until_ns)
+	/* Track the instantaneous delivery rate (stream time per wall time).
+	 * ~1.0 = steady; >1 = the server is flushing a backlog faster than
+	 * real time (catch-up burst after a disconnect/stall); <1 = slow/
+	 * stalling. Smoothed so normal jitter averages out. */
+	if (s->last_audio_arrival_ns != 0) {
+		int64_t d_arr = wall_now - s->last_audio_arrival_ns;
+		int64_t d_pts = af->pts_ns - s->last_audio_pts_ns;
+		if (d_arr > 0 && d_pts > 0) {
+			double inst = (double)d_pts / (double)d_arr;
+			if (inst > 3.0)
+				inst = 3.0;
+			s->deliv_ema += 0.1 * (inst - s->deliv_ema);
+		}
+		if (d_arr > STALL_GAP_NS)
+			s->clock_skip_until_ns = wall_now + CLOCK_SETTLE_NS;
+	}
+	s->last_audio_arrival_ns = wall_now;
+	s->last_audio_pts_ns = af->pts_ns;
+
+	/* Only feed the rate estimator with steady-state delivery. Skipping
+	 * catch-up bursts and stalls keeps them out of the measurement window
+	 * entirely, so the rate holds its true value instead of spiking — which
+	 * previously caused over-drain underruns and a sample-rate wobble. */
+	bool steady = s->deliv_ema > 0.85 && s->deliv_ema < 1.15;
+	if (wall_now >= s->clock_skip_until_ns && steady)
 		clock_tracker_record(&s->clock, af->pts_ns, wall_now);
 
 	/* Set anchor on first audio */
@@ -470,6 +490,8 @@ static void start_media(struct smooth_media_source *s)
 	s->stream_start_time = (int64_t)os_gettime_ns();
 	s->clock_skip_until_ns = s->stream_start_time + CLOCK_SETTLE_NS;
 	s->last_audio_arrival_ns = 0;
+	s->last_audio_pts_ns = 0;
+	s->deliv_ema = 1.0;
 	s->did_initial_trim = false;
 	s->sr_ratio = 1.0;
 	s->sr_slow_rate = 1.0;
