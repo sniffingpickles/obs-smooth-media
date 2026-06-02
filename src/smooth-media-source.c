@@ -20,6 +20,8 @@
 #define SR_UPDATE_DEADBAND_HZ 40.0         /* only re-declare sample rate after it drifts this far — keeps OBS's resampler from resetting (which clicks) */
 #define SR_MIN_HOLD_NS      (2000000000LL) /* and never re-declare more often than this */
 #define CLOCK_SETTLE_NS     (2000000000LL) /* ignore the first 2s of audio for rate measurement: SRT flushes its buffer in a burst at connect, which would otherwise poison the rate estimate */
+#define STALL_GAP_NS        (500000000LL)  /* an audio arrival gap larger than this is treated as a stall; rate measurement re-settles afterward so the stall+catch-up burst can't corrupt it. Kept well above normal jitter (which can momentarily exceed 250ms) so it only trips on genuine freezes. */
+#define SR_STABLE_JITTER_NS (50000000LL)   /* only change the declared sample rate while jitter is below this (link calm) — prevents chasing the rate during a disruption */
 
 /* Forward declarations */
 static void smooth_media_update(void *data, obs_data_t *settings);
@@ -266,14 +268,24 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	if (af->frames == 0 || af->sample_rate == 0)
 		return;
 
-	/* Record PTS for clock tracking — but skip the initial settle window.
-	 * At (re)connect the SRT server dumps its buffered backlog in a fast
-	 * burst; feeding that to the rate estimator makes it read ~1.08x and
-	 * then slowly walk back, causing a string of sample-rate changes (and
-	 * thus resampler-reset clicks) for the first ~45s. Measuring only
-	 * steady-state delivery makes the declared rate lock almost at once. */
+	/* Feed the rate estimator only with steady-state delivery. Two cases
+	 * are excluded because they make the estimate read garbage and the
+	 * sample-rate corrector then chases it (pitch wobble + resampler-reset
+	 * clicks):
+	 *   1. Connect: the SRT server dumps its backlog in a fast burst.
+	 *   2. Stalls: while the stream is frozen, wall time advances but PTS
+	 *      doesn't, so the rate dives toward 0.90; then the catch-up burst
+	 *      swings it back. A single blip otherwise causes ~40s of wobble.
+	 * Detecting an arrival gap re-arms the settle window so the stall AND
+	 * its catch-up burst are skipped; the rate simply holds its last-good
+	 * value through the disruption. */
 	int64_t wall_now = (int64_t)os_gettime_ns();
-	if (wall_now - s->stream_start_time >= CLOCK_SETTLE_NS)
+	if (s->last_audio_arrival_ns != 0 &&
+	    wall_now - s->last_audio_arrival_ns > STALL_GAP_NS)
+		s->clock_skip_until_ns = wall_now + CLOCK_SETTLE_NS;
+	s->last_audio_arrival_ns = wall_now;
+
+	if (wall_now >= s->clock_skip_until_ns)
 		clock_tracker_record(&s->clock, af->pts_ns, wall_now);
 
 	/* Set anchor on first audio */
@@ -456,6 +468,8 @@ static void start_media(struct smooth_media_source *s)
 	s->sr_change_count = 0;
 	s->last_underrun_log_time = 0;
 	s->stream_start_time = (int64_t)os_gettime_ns();
+	s->clock_skip_until_ns = s->stream_start_time + CLOCK_SETTLE_NS;
+	s->last_audio_arrival_ns = 0;
 	s->sr_ratio = 1.0;
 	s->sr_slow_rate = 1.0;
 	s->declared_sr = 0;
@@ -991,7 +1005,9 @@ static void smooth_media_tick(void *data, float seconds)
 			} else if (fabs(exact - (double)s->declared_sr) >=
 					   SR_UPDATE_DEADBAND_HZ &&
 				   (wall_now - s->last_sr_change_ns) >=
-					   SR_MIN_HOLD_NS) {
+					   SR_MIN_HOLD_NS &&
+				   audio_buffer_jitter_ns(&s->audio_buf) <
+					   SR_STABLE_JITTER_NS) {
 				uint32_t old_sr = s->declared_sr;
 				s->declared_sr = (uint32_t)(exact + 0.5);
 				s->last_sr_change_ns = wall_now;

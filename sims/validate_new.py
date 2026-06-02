@@ -40,6 +40,8 @@ SR_DEADBAND_HZ = 40.0
 SR_SLOW_ALPHA = 0.0015
 SR_MIN_HOLD = 2 * NS
 CLOCK_SETTLE = 2 * NS
+STALL_GAP = 500 * NS // 1000
+SR_STABLE_JITTER = 50 * NS // 1000
 
 
 class Clock:
@@ -150,6 +152,8 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1,
     sr_ratio = 1.0
     sr_slow = 1.0
     last_sr_change = 0
+    clock_skip_until = CLOCK_SETTLE
+    last_arrival = 0
     declared_sr = 0
     sr_changes = 0          # each = an OBS resampler reset = a click
     sr_changes_steady = 0   # changes after warmup+2s
@@ -167,7 +171,10 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1,
     while t <= end:
         while ai < len(arr) and arr[ai][0] <= t:
             a, pts = arr[ai]; ai += 1
-            if (not settle) or t >= CLOCK_SETTLE:
+            if last_arrival != 0 and t - last_arrival > STALL_GAP:
+                clock_skip_until = t + CLOCK_SETTLE   # re-settle after stall
+            last_arrival = t
+            if (not settle) or t >= clock_skip_until:
                 clk.record(pts, t)
             buf.push(pts, t)
 
@@ -209,7 +216,8 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1,
                 if declared_sr == 0:
                     change = True
                 elif (abs(exact - declared_sr) >= SR_DEADBAND_HZ and
-                      (t - last_sr_change) >= SR_MIN_HOLD):
+                      (t - last_sr_change) >= SR_MIN_HOLD and
+                      buf.jit < SR_STABLE_JITTER):
                     change = True
                 if change:
                     new_sr = int(exact + 0.5)
