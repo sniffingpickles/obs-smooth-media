@@ -3,7 +3,11 @@
 #include <math.h>
 
 #define DEFAULT_WINDOW_NS  (5000000000LL)  /* 5 seconds */
-#define DEFAULT_EMA_ALPHA  0.02
+/* Per-frame EMA factor. At ~47 updates/sec this gives a time constant of
+ * ~1/(alpha*47) ≈ 2.7 s — slow enough to ride over the 1–4 s delivery
+ * bursts that bonded cellular (SRTLA) produces without chasing them, while
+ * still tracking genuine sustained clock drift. */
+#define DEFAULT_EMA_ALPHA  0.008
 
 void clock_tracker_init(struct clock_tracker *ct)
 {

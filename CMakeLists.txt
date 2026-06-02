@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(obs-smooth-media VERSION 1.3.0)
+project(obs-smooth-media VERSION 1.4.0)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

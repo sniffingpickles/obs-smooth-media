@@ -47,15 +47,17 @@ The plugin automatically handles network buffering, audio jitter absorption, and
 
 ## How It Works
 
-The plugin uses three techniques to keep playback smooth:
+The plugin uses a self-tuning, closed-loop pipeline to keep playback smooth — there's nothing to configure:
 
-- **Clock Drift Tracking** — Continuously measures how fast the stream delivers data relative to wall time using an EMA-smoothed ratio over a sliding window.
+- **Clock Drift Tracking** — Continuously measures how fast the stream delivers data relative to wall time using an EMA-smoothed ratio over a multi-second window, slow enough to ride over bonded-cellular delivery bursts without chasing them.
 
-- **Audio Jitter Buffer** — Holds 80ms of audio before starting playback. Absorbs short-term network timing irregularities so they never reach the output.
+- **Rate-Paced Drain (closed loop)** — Audio is released from the buffer at the stream's *actual* delivery rate, not a fixed 1.0×. This keeps the buffer from draining away on streams that run slightly slow (the most common IRL case), so a jitter cushion is always available.
 
-- **Adaptive Sample Rate Correction** — If the stream is consistently slower or faster than realtime (beyond a 4% deadzone sustained for 3+ seconds), the declared audio sample rate is nudged so OBS consumes audio at the stream's actual pace. No resampling artifacts — just seamless pacing.
+- **Adaptive Jitter Buffer** — Starts at 80ms and automatically grows with the link's measured jitter and recent dropouts (up to a bounded latency ceiling), then shrinks again when the connection calms down. Rough cellular links get a deeper cushion; clean links stay low-latency. Zero knobs.
 
-Video frame timestamps use PTS-delta stepping from the encoder for perfectly even frame spacing (e.g. exactly 16.667ms for 60fps), with a gentle drift correction to stay aligned with audio over long sessions.
+- **Continuous Sample-Rate Matching** — The declared audio sample rate is nudged continuously (slew-limited, no steps) so OBS consumes audio at the stream's true pace. No deadzone, no resampling artifacts, no pitch steps — just seamless pacing.
+
+Video frame timestamps use PTS-delta stepping from the encoder for perfectly even frame spacing (e.g. exactly 16.667ms for 60fps), offset to match the audio buffer depth so lips stay synced, with a gentle drift correction over long sessions.
 
 ## Supported Protocols
 

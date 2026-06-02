@@ -15,7 +15,11 @@
  * provides a correction factor that the output logic can use to pace itself.
  */
 
-#define CLOCK_HISTORY_SIZE 64
+/* Sized so the full measurement window fits in history. At ~47 audio
+ * frames/sec a 5 s window needs ~235 samples; the old value of 64 capped
+ * the window at ~1.35 s regardless of window_ns, making the rate estimate
+ * noisy and biased toward the clamp under catch-up bursts. */
+#define CLOCK_HISTORY_SIZE 320
 
 struct clock_sample {
 	int64_t stream_pts_ns;  /* PTS from the stream (nanoseconds) */

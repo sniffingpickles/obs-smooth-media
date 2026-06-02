@@ -44,11 +44,21 @@ struct audio_buffer {
 	int count;
 
 	/* Configuration */
-	int64_t min_buffer_ns;    /* minimum buffer level before we start outputting (default: 80ms) */
-	int64_t max_buffer_ns;    /* maximum buffer level before we drop old frames (default: 500ms) */
+	int64_t min_buffer_ns;    /* floor for the adaptive target (default: 80ms) */
+	int64_t max_buffer_ns;    /* hard latency ceiling; drop old frames past this */
+
+	/* Adaptive jitter target — self-tuning, no user knobs. Grows with the
+	 * measured arrival jitter and with recent underruns; decays slowly when
+	 * the link is calm. The consumer primes at, and paces toward, this. */
+	int64_t target_buffer_ns;     /* current adaptive target depth */
+	int64_t jitter_ns;            /* RFC 3550-style smoothed arrival jitter */
+	int64_t underrun_credit_ns;   /* extra cushion accrued after underruns */
+	int64_t prev_arrival_ns;      /* wall time of previous push */
+	int64_t prev_arrival_pts_ns;  /* PTS of previous push */
+	bool    have_arrival_ref;     /* prev_arrival_* are valid */
 
 	/* State */
-	bool primed;              /* true once we've accumulated min_buffer_ns of data */
+	bool primed;              /* true once we've accumulated target_buffer_ns of data */
 	int64_t total_buffered_ns; /* approximate total buffered duration */
 	int64_t last_output_pts;  /* PTS of last output frame */
 
@@ -68,18 +78,28 @@ void audio_buffer_init(struct audio_buffer *ab);
 void audio_buffer_free(struct audio_buffer *ab);
 void audio_buffer_reset(struct audio_buffer *ab);
 
-/* Push an audio frame into the buffer. Data is copied. */
+/* Push an audio frame into the buffer. Data is copied. arrival_wall_ns is the
+ * wall-clock time the frame was received (used for adaptive jitter sizing). */
 bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 		       const size_t *data_sizes, uint32_t frames,
 		       uint32_t sample_rate, uint32_t channels,
-		       int format, int speakers, int64_t pts_ns);
+		       int format, int speakers, int64_t pts_ns,
+		       int64_t arrival_wall_ns);
 
 /* Try to pop the next audio frame. Returns false if buffer isn't ready.
- * The returned frame pointer is valid until the next push or pop. */
+ * The returned frame pointer is valid until the next pop (it is a private
+ * copy, unaffected by concurrent pushes). */
 bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out);
+
+/* Record that the consumer wanted a frame but the buffer was empty. Grows the
+ * adaptive cushion so playback rebuilds a deeper buffer after a stall. */
+void audio_buffer_note_underrun(struct audio_buffer *ab);
 
 /* Get current buffer level in nanoseconds */
 int64_t audio_buffer_level_ns(const struct audio_buffer *ab);
+
+/* Get the current adaptive target depth in nanoseconds */
+int64_t audio_buffer_target_ns(const struct audio_buffer *ab);
 
 /* Check if buffer is primed and ready to output */
 bool audio_buffer_is_ready(const struct audio_buffer *ab);

@@ -14,8 +14,8 @@
 #define NETWORK_BUFFER_MB   2
 #define JITTER_BUFFER_MS    80
 #define MAX_BUFFER_MS       500
-#define SR_WARMUP_NS        (5000000000LL) /* 5s: skip rate correction while clock tracker settles */
-#define SR_HOLD_TIME_NS     (3000000000LL) /* 3s: rate must stay outside deadzone this long before adjusting */
+#define SR_WARMUP_NS        (5000000000LL) /* 5s: hold rate at 1.0x while the clock tracker settles */
+#define SR_SLEW_PER_POP     0.0005         /* max declared-rate change per popped frame (~2.3%/s) — no audible pitch steps */
 
 /* Forward declarations */
 static void smooth_media_update(void *data, obs_data_t *settings);
@@ -153,10 +153,11 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	 * of sync_pts setting. PTS deltas give smooth frame spacing;
 	 * asymmetric drift correction keeps timestamps near wall clock.
 	 *
-	 * Video is offset forward by the jitter buffer depth so OBS
-	 * holds the frame before displaying it. This compensates for
-	 * the delay audio experiences sitting in the jitter buffer. */
-	int64_t buf_offset = s->audio_buf.min_buffer_ns;
+	 * Video is offset forward by the (adaptive) jitter buffer depth so
+	 * OBS holds the frame before displaying it. This compensates for the
+	 * delay audio experiences sitting in the jitter buffer and keeps lips
+	 * synced as the target depth adapts to link jitter. */
+	int64_t buf_offset = audio_buffer_target_ns(&s->audio_buf);
 	int64_t out_ts;
 
 	if (s->video_frames_out == 0) {
@@ -291,7 +292,7 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 			  af->sample_rate, af->channels,
 			  (int)obs_fmt,
 			  (int)channels_to_speakers(af->channels),
-			  af->pts_ns);
+			  af->pts_ns, wall_now);
 
 	if (!was_primed && audio_buffer_is_ready(&s->audio_buf)) {
 		SM_LOG(LOG_INFO,
@@ -442,7 +443,7 @@ static void start_media(struct smooth_media_source *s)
 	s->pending_drop_count = 0;
 	s->last_diag_time = 0;
 	s->stream_start_time = (int64_t)os_gettime_ns();
-	s->sr_hold_start = 0;
+	s->sr_ratio = 1.0;
 	s->last_audio_pop_time = 0;
 	s->audio_frame_dur_ns = 0;
 	s->prev_video_pts = 0;
@@ -452,8 +453,10 @@ static void start_media(struct smooth_media_source *s)
 	s->active = true;
 	s->kill = false;
 
-	/* Configure jitter buffer (hardcoded — proven values) */
+	/* Configure jitter buffer floor; the target/ceiling self-tune from
+	 * here based on measured link jitter and underruns. */
 	s->audio_buf.min_buffer_ns = JITTER_BUFFER_MS * 1000000LL;
+	s->audio_buf.target_buffer_ns = JITTER_BUFFER_MS * 1000000LL;
 	s->audio_buf.max_buffer_ns = MAX_BUFFER_MS * 1000000LL;
 
 	pthread_mutex_lock(&s->state_mutex);
@@ -502,11 +505,15 @@ static void *reconnect_thread_func(void *data)
 		       s->reconnect_attempts);
 	start_media(s);
 
-	/* Clear reconnecting flag so smooth_media_tick can schedule
-	 * another reconnect if this attempt also fails. */
-	pthread_mutex_lock(&s->reconnect_mutex);
+	/* Clear reconnecting flag so smooth_media_tick can schedule another
+	 * reconnect if this attempt also fails.
+	 *
+	 * IMPORTANT: this is a plain (volatile) write with NO mutex. Other
+	 * threads (hide/deactivate/update/destroy) call pthread_join on this
+	 * thread *while holding* reconnect_mutex; if we tried to take that
+	 * mutex here we would deadlock against the joiner. 'reconnecting' is
+	 * only an advisory flag, so a lock-free write is safe. */
 	s->reconnecting = false;
-	pthread_mutex_unlock(&s->reconnect_mutex);
 
 	return NULL;
 }
@@ -547,7 +554,7 @@ static const char *smooth_media_get_name(void *unused)
 
 static void smooth_media_defaults(obs_data_t *settings)
 {
-	obs_data_set_default_int(settings, "reconnect_delay_sec", 10);
+	obs_data_set_default_int(settings, "reconnect_delay_sec", 5);
 	obs_data_set_default_bool(settings, "hw_decode", false);
 	obs_data_set_default_bool(settings, "sync_pts", false);
 	obs_data_set_default_bool(settings, "close_when_inactive", true);
@@ -819,11 +826,57 @@ static void smooth_media_tick(void *data, float seconds)
 		if (frame_dur <= 0)
 			frame_dur = 21333333LL; /* 1024 / 48000 */
 
-		/* Pop up to 3 frames per tick to handle low-fps
-		 * rendering (e.g. 30 fps → 33 ms between ticks,
-		 * need ~1.5 audio frames per tick on average). */
+		/* Measured stream delivery rate (clamped to sane drift). */
+		double rate = clock_tracker_get_smoothed_rate(&s->clock);
+		if (rate < 0.90)
+			rate = 0.90;
+		if (rate > 1.10)
+			rate = 1.10;
+
+		/* ── Closed-loop drain pacing ──
+		 * Pop cadence is paced to the stream's TRUE delivery rate, so
+		 * the buffer neither drains nor fills under sustained drift —
+		 * the open-loop fixed-1.0x cadence used to empty the buffer in
+		 * ~4s on a 0.98x stream, killing all jitter protection. A mild
+		 * proportional term nudges the level back toward the adaptive
+		 * target after disturbances. */
+		int64_t target = audio_buffer_target_ns(&s->audio_buf);
+		int64_t level = audio_buffer_level_ns(&s->audio_buf);
+		double lvl_err = 0.0;
+		if (target > 0) {
+			lvl_err = (double)(level - target) / (double)target;
+			/* Refill-only: when below target, slow the drain to let
+			 * it rebuild; when above, do NOT speed up (that over-
+			 * drains and can push extra audio into OBS) — the
+			 * drop-oldest ceiling bounds excess latency instead. */
+			if (lvl_err > 0.0)
+				lvl_err = 0.0;
+			if (lvl_err < -0.5)
+				lvl_err = -0.5;
+		}
+		int64_t pop_interval =
+			(int64_t)((double)frame_dur / rate *
+				  (1.0 - 0.15 * lvl_err));
+
+		/* ── Continuous, slew-limited sample-rate match ──
+		 * Declare the stream's actual rate so OBS consumes at the
+		 * delivery pace. No deadzone (small drift is corrected too) and
+		 * no round-to-100 (which caused ~2kHz/4% audible pitch steps);
+		 * the per-pop slew limit keeps changes inaudible. */
+		bool in_warmup =
+			(wall_now - s->stream_start_time) < SR_WARMUP_NS;
+		double desired_ratio = in_warmup ? 1.0 : rate;
+		if (desired_ratio < 0.95)
+			desired_ratio = 0.95;
+		if (desired_ratio > 1.05)
+			desired_ratio = 1.05;
+		if (s->sr_ratio <= 0.0)
+			s->sr_ratio = 1.0;
+
 		int pops = 0;
-		while (pops < 3) {
+		/* Cap at 8 so a post-stall backlog can be drained over a tick
+		 * without an unbounded burst. */
+		while (pops < 8) {
 			bool should_pop;
 			if (s->last_audio_pop_time == 0) {
 				should_pop = audio_buffer_is_ready(
@@ -831,14 +884,21 @@ static void smooth_media_tick(void *data, float seconds)
 			} else {
 				int64_t elapsed = wall_now -
 					s->last_audio_pop_time;
-				should_pop = (elapsed >= frame_dur);
+				should_pop = (elapsed >= pop_interval);
 			}
 			if (!should_pop)
 				break;
 
 			struct audio_buf_frame *buf_frame;
-			if (!audio_buffer_pop(&s->audio_buf, &buf_frame))
+			if (!audio_buffer_pop(&s->audio_buf, &buf_frame)) {
+				/* Wanted audio but buffer empty → underrun;
+				 * grow the adaptive cushion so we rebuild a
+				 * deeper buffer after the stall. */
+				if (s->audio_frames_out > 0)
+					audio_buffer_note_underrun(
+						&s->audio_buf);
 				break;
+			}
 
 			/* Update frame duration estimate from actual
 			 * popped frame */
@@ -850,63 +910,31 @@ static void smooth_media_tick(void *data, float seconds)
 					buf_frame->sample_rate;
 
 			/* Advance pop timer.  First pop anchors to now;
-			 * subsequent pops advance by frame_dur to stay
-			 * in lockstep.  If we fall more than 2 frames
+			 * subsequent pops advance by pop_interval to stay
+			 * in lockstep.  If we fall more than 2 intervals
 			 * behind (e.g. after a stall), re-anchor. */
 			if (s->last_audio_pop_time == 0) {
 				s->last_audio_pop_time = wall_now;
 			} else {
-				s->last_audio_pop_time += frame_dur;
+				s->last_audio_pop_time += pop_interval;
 				if (wall_now - s->last_audio_pop_time >
-				    frame_dur * 2)
+				    pop_interval * 2)
 					s->last_audio_pop_time =
-						wall_now - frame_dur;
+						wall_now - pop_interval;
 			}
 
-			/* ── Sample-rate adjustment ── */
-			double rate = clock_tracker_get_smoothed_rate(
-				&s->clock);
+			/* Slew the declared-rate ratio toward target. */
+			double dr = desired_ratio - s->sr_ratio;
+			if (dr > SR_SLEW_PER_POP)
+				dr = SR_SLEW_PER_POP;
+			if (dr < -SR_SLEW_PER_POP)
+				dr = -SR_SLEW_PER_POP;
+			s->sr_ratio += dr;
 
-			uint32_t adjusted_sample_rate =
-				buf_frame->sample_rate;
-			bool in_warmup =
-				(wall_now - s->stream_start_time) <
-				SR_WARMUP_NS;
-			bool outside_deadzone =
-				fabs(rate - 1.0) > 0.04;
-
-			if (outside_deadzone) {
-				if (s->sr_hold_start == 0)
-					s->sr_hold_start = wall_now;
-			} else {
-				s->sr_hold_start = 0;
-			}
-
-			bool held_long_enough =
-				s->sr_hold_start != 0 &&
-				(wall_now - s->sr_hold_start) >=
-					SR_HOLD_TIME_NS;
-
-			if (!in_warmup && held_long_enough) {
-				uint32_t raw = (uint32_t)(
-					(double)buf_frame->sample_rate *
-					rate);
-				adjusted_sample_rate =
-					((raw + 50) / 100) * 100;
-				/* Clamp to ±5 %.  Real clock drift is
-				 * tiny; anything larger is a transient
-				 * measurement artifact. */
-				uint32_t sr_min =
-					(uint32_t)(buf_frame->sample_rate *
-						   0.95);
-				uint32_t sr_max =
-					(uint32_t)(buf_frame->sample_rate *
-						   1.05);
-				if (adjusted_sample_rate < sr_min)
-					adjusted_sample_rate = sr_min;
-				if (adjusted_sample_rate > sr_max)
-					adjusted_sample_rate = sr_max;
-			}
+			uint32_t adjusted_sample_rate = (uint32_t)(
+				(double)buf_frame->sample_rate *
+					s->sr_ratio +
+				0.5);
 
 			/* ── Timestamp computation ──
 			 * sync_pts ON : 1 % drift correction + wall
@@ -1042,10 +1070,13 @@ static void smooth_media_tick(void *data, float seconds)
 						  s->video_out_ts;
 				SM_LOG(LOG_INFO,
 				       "DIAG: rate=%.4f adj_sr=%u "
-				       "buf=%lldms av_wall=%lldms "
+				       "buf=%lldms tgt=%lldms av_wall=%lldms "
 				       "a_out=%llu v_out=%llu%s",
 				       rate, adjusted_sample_rate,
 				       (long long)(audio_buffer_level_ns(
+							&s->audio_buf) /
+						  1000000),
+				       (long long)(audio_buffer_target_ns(
 							&s->audio_buf) /
 						  1000000),
 				       (long long)(av_wall / 1000000),

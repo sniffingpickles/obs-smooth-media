@@ -18,3 +18,7 @@ compiles/
 CMakeSettings.json
 compile_commands.json
 .DS_Store
+
+# python sim caches
+sims/__pycache__/
+*.pyc
