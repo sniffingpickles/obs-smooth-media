@@ -1127,6 +1127,19 @@ static void smooth_media_tick(void *data, float seconds)
 					buf_frame->speakers;
 			obs_audio.timestamp = out_ts;
 
+			/* One-time confirmation of exactly what we hand OBS, so
+			 * "no audio" reports can be triaged: if these look sane
+			 * and the mixer meter still doesn't move, the issue is
+			 * OBS-side routing (mute / track / monitoring). */
+			if (s->audio_frames_out == 0)
+				SM_LOG(LOG_INFO,
+				       "First audio -> OBS: fmt=%d speakers=%d sr=%u frames=%u ts=%lldms",
+				       (int)obs_audio.format,
+				       (int)obs_audio.speakers,
+				       obs_audio.samples_per_sec,
+				       obs_audio.frames,
+				       (long long)(out_ts / 1000000));
+
 			obs_source_output_audio(s->source, &obs_audio);
 			s->audio_frames_out++;
 			pops++;
