@@ -19,6 +19,7 @@
 #define SR_SLOW_ALPHA       0.0015         /* per-tick EMA on the drift estimate (~11s TC) — rejects jitter-induced rate wobble so the declared rate stays put */
 #define SR_UPDATE_DEADBAND_HZ 40.0         /* only re-declare sample rate after it drifts this far — keeps OBS's resampler from resetting (which clicks) */
 #define SR_MIN_HOLD_NS      (2000000000LL) /* and never re-declare more often than this */
+#define CLOCK_SETTLE_NS     (2000000000LL) /* ignore the first 2s of audio for rate measurement: SRT flushes its buffer in a burst at connect, which would otherwise poison the rate estimate */
 
 /* Forward declarations */
 static void smooth_media_update(void *data, obs_data_t *settings);
@@ -265,9 +266,15 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	if (af->frames == 0 || af->sample_rate == 0)
 		return;
 
-	/* Record PTS for clock tracking */
+	/* Record PTS for clock tracking — but skip the initial settle window.
+	 * At (re)connect the SRT server dumps its buffered backlog in a fast
+	 * burst; feeding that to the rate estimator makes it read ~1.08x and
+	 * then slowly walk back, causing a string of sample-rate changes (and
+	 * thus resampler-reset clicks) for the first ~45s. Measuring only
+	 * steady-state delivery makes the declared rate lock almost at once. */
 	int64_t wall_now = (int64_t)os_gettime_ns();
-	clock_tracker_record(&s->clock, af->pts_ns, wall_now);
+	if (wall_now - s->stream_start_time >= CLOCK_SETTLE_NS)
+		clock_tracker_record(&s->clock, af->pts_ns, wall_now);
 
 	/* Set anchor on first audio */
 	if (!s->first_audio) {

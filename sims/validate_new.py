@@ -39,6 +39,7 @@ POP_CAP = 8
 SR_DEADBAND_HZ = 40.0
 SR_SLOW_ALPHA = 0.0015
 SR_MIN_HOLD = 2 * NS
+CLOCK_SETTLE = 2 * NS
 
 
 class Clock:
@@ -109,7 +110,8 @@ class Buf:
         self.cred = min(CRED_CAP, self.cred + CRED_STEP); self.recalc()
 
 
-def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1, src_sr=44100):
+def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1,
+        src_sr=44100, connect_burst_s=0.0, settle=True):
     rng = random.Random(seed)
     clk, buf = Clock(), Buf()
     buf.recalc()
@@ -125,9 +127,14 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1, src_s
     arr = []
     step = FRAME_DUR / rate
     prev_push = 0
+    burst_frames = int(connect_burst_s * NS / FRAME_DUR)
     for k in range(n):
         pts = k * FRAME_DUR
         base = k * step
+        # connect burst: the first connect_burst_s of media is dumped by the
+        # server in ~0.3s wall (SRT buffer flush)
+        if k < burst_frames:
+            base = 0.3 * NS * (k / max(1, burst_frames))
         for (ss, sd) in stalls:
             if ss * NS <= base < (ss + sd) * NS:
                 base = (ss + sd) * NS + (base - ss * NS) * 0.05  # catch-up burst
@@ -160,7 +167,8 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1, src_s
     while t <= end:
         while ai < len(arr) and arr[ai][0] <= t:
             a, pts = arr[ai]; ai += 1
-            clk.record(pts, t)
+            if (not settle) or t >= CLOCK_SETTLE:
+                clk.record(pts, t)
             buf.push(pts, t)
 
         if buf.primed or frames_out > 0:
@@ -275,3 +283,7 @@ if __name__ == "__main__":
     run("WORST: .985x+50ms+2s stalls", 0.985, 50, stalls=[(35,2),(85,2),(135,1.5)])
     run("clean 1.00x @30fps", 1.00, fps=30)
     run("slow 0.98x @30fps", 0.98, fps=30)
+
+    print("\nPost-connect burst (SRT flush) — settle gate OFF vs ON:")
+    run("connect-burst, settle OFF", 1.001, connect_burst_s=2.0, settle=False, dur=90)
+    run("connect-burst, settle ON ", 1.001, connect_burst_s=2.0, settle=True, dur=90)
