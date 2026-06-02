@@ -72,6 +72,9 @@ struct smooth_media_source {
 	int64_t last_diag_time;        /* wall clock of last diagnostic log */
 	int64_t stream_start_time;     /* wall clock when stream opened */
 	double sr_ratio;               /* slew-limited declared-sample-rate ratio (1.0 = no correction) */
+	double sr_slow_rate;           /* heavily-smoothed drift estimate that drives the declared rate */
+	uint32_t declared_sr;          /* last sample rate handed to OBS (held stable via deadband) */
+	int64_t last_sr_change_ns;     /* wall time the declared rate last changed (min-hold) */
 	int64_t last_audio_pop_time;   /* wall time of last audio pop (for steady-rate drain) */
 	int64_t audio_frame_dur_ns;    /* estimated duration of one audio frame in ns */
 

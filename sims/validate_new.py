@@ -33,9 +33,12 @@ CRED_DECAY = 500_000
 JCOEF = 3
 
 # tick / SR
-WARMUP = 5 * NS
+WARMUP = 8 * NS
 SLEW = 0.0005
 POP_CAP = 8
+SR_DEADBAND_HZ = 40.0
+SR_SLOW_ALPHA = 0.0015
+SR_MIN_HOLD = 2 * NS
 
 
 class Clock:
@@ -106,10 +109,12 @@ class Buf:
         self.cred = min(CRED_CAP, self.cred + CRED_STEP); self.recalc()
 
 
-def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1):
+def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1, src_sr=44100):
     rng = random.Random(seed)
     clk, buf = Clock(), Buf()
     buf.recalc()
+    global FRAME_DUR
+    FRAME_DUR = FS * NS // src_sr
 
     # producer arrival schedule. PTS is monotonic (FFmpeg emits decoded audio
     # in order); jitter perturbs *arrival* time but in-order delivery means a
@@ -136,6 +141,11 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1):
     ai = 0
     last_pop = 0
     sr_ratio = 1.0
+    sr_slow = 1.0
+    last_sr_change = 0
+    declared_sr = 0
+    sr_changes = 0          # each = an OBS resampler reset = a click
+    sr_changes_steady = 0   # changes after warmup+2s
     audio_next = 0
     prev_pts = 0
     frames_out = 0
@@ -159,8 +169,9 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1):
             if buf.target > 0:
                 lvl_err = max(-0.5, min(0.0, (buf.level - buf.target) / buf.target))
             pop_interval = (frame_dur_est / rate_c) * (1 - 0.15 * lvl_err)
+            sr_slow += SR_SLOW_ALPHA * (rate_c - sr_slow)
             in_warmup = (t - stream_start) < WARMUP
-            desired = 1.0 if in_warmup else max(0.95, min(1.05, rate_c))
+            desired = 1.0 if in_warmup else max(0.95, min(1.05, sr_slow))
 
             pops = 0
             while pops < POP_CAP:
@@ -184,6 +195,23 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1):
                 dr = max(-SLEW, min(SLEW, desired - sr_ratio))
                 sr_ratio += dr
 
+                # deadband + min-hold held declared sample rate (= resampler resets)
+                exact = src_sr * sr_ratio
+                change = False
+                if declared_sr == 0:
+                    change = True
+                elif (abs(exact - declared_sr) >= SR_DEADBAND_HZ and
+                      (t - last_sr_change) >= SR_MIN_HOLD):
+                    change = True
+                if change:
+                    new_sr = int(exact + 0.5)
+                    if new_sr != declared_sr:
+                        sr_changes += 1
+                        if t > WARMUP + 2 * NS:
+                            sr_changes_steady += 1
+                    declared_sr = new_sr
+                    last_sr_change = t
+
                 # non-sync timestamp path
                 if frames_out == 0:
                     out_ts = t; audio_next = t; prev_pts = pts
@@ -206,7 +234,7 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1):
                         audio_next = t
                     out_ts = audio_next
                 out_ts_list.append(out_ts)
-                sr_list.append(sr_ratio)
+                sr_list.append(declared_sr)
                 frames_out += 1
                 pops += 1
             levels.append(buf.level)
@@ -226,12 +254,10 @@ def run(name, rate=1.0, jitter_ms=0.0, stalls=(), fps=60, dur=180, seed=1):
         elif dev > 5_000_000: disc5 += 1
     sr_min = min(sr_list) if sr_list else 1
     sr_max = max(sr_list) if sr_list else 1
-    sr_maxstep = max((abs(sr_list[i]-sr_list[i-1]) for i in range(1, len(sr_list))), default=0)
-    print(f"{name:38s} avg_buf={avg:5.0f}ms min={mn:4.0f}ms empty={pe:5.1f}% "
+    print(f"{name:34s} avg_buf={avg:4.0f}ms empty={pe:4.1f}% "
           f"under={underruns:4d} drop={buf.dropped:4d} "
-          f"disc>20ms={disc20:3d} >5ms={disc5:4d} "
-          f"sr=[{sr_min:.4f},{sr_max:.4f}] sr_step={sr_maxstep*1e6:.1f}ppm "
-          f"finalJ={buf.jit/1e6:.0f}ms tgt={buf.target/1e6:.0f}ms")
+          f"disc>20ms={disc20:3d} CLICKS(sr_resets)={sr_changes:4d} steady={sr_changes_steady:3d} "
+          f"sr=[{sr_min},{sr_max}] tgt={buf.target/1e6:.0f}ms")
 
 
 if __name__ == "__main__":

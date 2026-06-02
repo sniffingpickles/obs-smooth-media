@@ -1,0 +1,380 @@
+04:54:48.773: CPU Name: Intel(R) Core(TM) i7-7700 CPU @ 3.60GHz
+04:54:48.773: CPU Speed: 3600MHz
+04:54:48.773: Physical Cores: 4, Logical Cores: 8
+04:54:48.773: Physical Memory: 32551MB Total, 27432MB Free
+04:54:48.773: Windows Version: 10.0 Build 20348 (release: 21H2; revision: 1249; 64-bit)
+04:54:48.773: Running as administrator: true
+04:54:48.773: Windows 10/11 Gaming Features:
+04:54:48.773: 	Game Mode: Probably On (no reg key set)
+04:54:48.774: Current Date/Time: 2026-06-02, 04:54:48
+04:54:48.774: Browser Hardware Acceleration: true
+04:54:48.774: Hide OBS windows from screen capture: false
+04:54:48.774: Qt Version: 6.8.3 (runtime), 6.8.3 (compiled)
+04:54:48.774: Portable mode: false
+04:54:48.891: OBS 32.0.4 (64-bit, windows)
+04:54:48.891: ---------------------------------
+04:54:48.930: ---------------------------------
+04:54:48.930: audio settings reset:
+04:54:48.930: 	samples per sec: 48000
+04:54:48.930: 	speakers:        2
+04:54:48.930: 	max buffering:   960 milliseconds
+04:54:48.930: 	buffering type:  dynamically increasing
+04:54:48.931: ---------------------------------
+04:54:48.931: Initializing D3D11...
+04:54:48.932: Available Video Adapters: 
+04:54:48.933: 	Adapter 0: Intel(R) HD Graphics 630
+04:54:48.933: 	  Dedicated VRAM: 134217728 (0.1 GiB)
+04:54:48.933: 	  Shared VRAM:    17066182656 (15.9 GiB)
+04:54:48.933: 	  PCI ID:         8086:5912
+04:54:48.933: 	  HAGS Status:    Disabled (Default: No, Driver status: Unsupported)
+04:54:48.934: 	  Driver Version: 24.20.100.6290
+04:54:48.935: 	  output 0:
+04:54:48.935: 	    name=
+04:54:48.935: 	    pos={0, 0}
+04:54:48.935: 	    size={2464, 1226}
+04:54:48.935: 	    attached=true
+04:54:48.935: 	    refresh=32
+04:54:48.935: 	    bits_per_color=8
+04:54:48.935: 	    space=RGB_FULL_G22_NONE_P709
+04:54:48.935: 	    primaries=[r=(0.000000, 0.000000), g=(0.000000, 0.000000), b=(0.000000, 0.000000), wp=(0.000000, 0.000000)]
+04:54:48.935: 	    relative_gamut_area=[709=0.000000, P3=0.000000, 2020=0.000000]
+04:54:48.935: 	    sdr_white_nits=80
+04:54:48.935: 	    nit_range=[min=0.000000, max=0.000000, max_full_frame=0.000000]
+04:54:48.935: 	    dpi=96 (100%)
+04:54:48.935: 	    id=\\?\DISPLAY#Default_Monitor#1&1f0c3c2f&0&UID256#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}
+04:54:48.935: 	    alt_id=\\.\DISPLAY2353
+04:54:48.935: 	Adapter 1: Intel(R) HD Graphics 630
+04:54:48.935: 	  Dedicated VRAM: 134217728 (0.1 GiB)
+04:54:48.935: 	  Shared VRAM:    17066182656 (15.9 GiB)
+04:54:48.935: 	  PCI ID:         8086:5912
+04:54:48.935: 	  HAGS Status:    Disabled (Default: No, Driver status: Unsupported)
+04:54:48.935: 	  Driver Version: 24.20.100.6290
+04:54:48.936: Loading up D3D11 on adapter Intel(R) HD Graphics 630 (0)
+04:54:48.955: D3D11 loaded successfully, feature level used: b000
+04:54:48.955: DXGI increase maximum frame latency success
+04:54:49.932: ---------------------------------
+04:54:49.932: video settings reset:
+04:54:49.932: 	base resolution:   1920x1080
+04:54:49.932: 	output resolution: 1920x1080
+04:54:49.932: 	downscale filter:  Bicubic
+04:54:49.932: 	fps:               60/1
+04:54:49.932: 	format:            NV12
+04:54:49.932: 	YUV mode:          Rec. 709/Partial
+04:54:49.932: NV12 texture support enabled
+04:54:49.932: P010 texture support not available
+04:54:49.933: Audio monitoring device:
+04:54:49.933: 	name: Default
+04:54:49.933: 	id: default
+04:54:49.978: ---------------------------------
+04:54:49.985: No AJA devices found, skipping loading AJA UI plugin
+04:54:49.985: Failed to initialize module 'aja-output-ui.dll'
+04:54:49.992: No AJA devices found, skipping loading AJA plugin
+04:54:49.992: Failed to initialize module 'aja.dll'
+04:54:50.015: Skipping module 'BitrateSceneSwitch', is disabled
+04:54:50.015: Skipping module '../../obs-plugins/64bit/chrome_elf.dll', not an OBS plugin
+04:54:50.023: [CoreAudio encoder]: CoreAudio AAC encoder not installed on the system or couldn't be loaded
+04:54:50.023: Failed to load 'en-US' text for module: 'decklink-captions.dll'
+04:54:50.024: Failed to load 'en-US' text for module: 'decklink-output-ui.dll'
+04:54:50.033: A DeckLink iterator could not be created.  The DeckLink drivers may not be installed
+04:54:50.033: Failed to initialize module 'decklink.dll'
+04:54:50.552: [irl-audio-return] loaded v1.0.0 (protocol v1)
+04:54:50.552: Skipping module '../../obs-plugins/64bit/libcef.dll', not an OBS plugin
+04:54:50.553: Skipping module '../../obs-plugins/64bit/libcrypto-3-x64.dll', not an OBS plugin
+04:54:50.708: Skipping module '../../obs-plugins/64bit/libcurl-x64.dll', not an OBS plugin
+04:54:50.708: Skipping module '../../obs-plugins/64bit/libEGL.dll', not an OBS plugin
+04:54:50.708: Skipping module '../../obs-plugins/64bit/libGLESv2.dll', not an OBS plugin
+04:54:50.709: Skipping module '../../obs-plugins/64bit/libssl-3-x64.dll', not an OBS plugin
+04:54:50.738: [multi-streamer] Config loaded (1 targets)
+04:54:50.753: [multi-streamer] version 1.0.0 loaded
+04:54:50.760: [NVIDIA Audio Effects:] NVIDIA denoiser disabled, redistributable not found or could not be loaded.
+04:54:50.761: Failed to get NVVideoEffects.dll version info size
+04:54:50.761: [NVIDIA VIDEO FX]: FX disabled, redistributable not found or could not be loaded.
+04:54:50.777: [obs-browser]: Version 2.26.3
+04:54:50.777: [obs-browser]: CEF Version 127.0.6533.120 (runtime), 127.145.7+g2b7d20b+chromium-127.0.6533.120 (compiled)
+04:54:50.777: [obs-browser]: Blacklisted device detected, disabling browser source hardware acceleration.
+04:54:51.287: [obs-multi-rtmp] Loading locale string 'Btn.NewTarget': Add new target
+04:54:51.288: [obs-multi-rtmp] Loading locale strings - StartAll: Start all, StopAll: Stop all
+04:54:51.288: QLayout: Attempting to add QLayout "" to QWidget "", which already has a layout
+04:54:51.289: [obs-multi-rtmp] Load 0 targets, 0 video configs, 0 audio configs
+04:54:51.289: [obs-multi-rtmp] Load config from C:\Users\Administrator\AppData\Roaming\obs-studio/basic/profiles/Untitled/obs-multi-rtmp.json
+04:54:51.315: [obs-multi-rtmp] version: 0.7.2.0 by SoraYuki https://github.com/sorayuki/obs-multi-rtmp/
+04:54:51.338: LoadLibrary failed for 'nvEncodeAPI64.dll': The specified module could not be found.
+04:54:51.338:  (126)
+04:54:51.338: NVENC not supported
+04:54:51.338: Failed to initialize module 'obs-nvenc.dll'
+04:54:51.537: [obs-smooth-media] Plugin loaded (v1.4.0)
+04:54:51.554: Skipping module 'obs-streamear', is disabled
+04:54:51.593: [obs-websocket] [obs_module_load] you can haz websockets (Version: 5.6.3 | RPC Version: 1)
+04:54:51.593: [obs-websocket] [obs_module_load] Qt version (compile-time): 6.8.3 | Qt version (run-time): 6.8.3
+04:54:51.593: [obs-websocket] [obs_module_load] Linked ASIO Version: 103200
+04:54:51.605: [obs-websocket] [obs_module_load] Module loaded.
+04:54:51.612: Skipping module '../../obs-plugins/64bit/Qt6WebSockets.dll', not an OBS plugin
+04:54:51.642: [vlc-video]: Couldn't find VLC installation, VLC video source disabled
+04:54:51.929: ---------------------------------
+04:54:51.929:   Loaded Modules:
+04:54:51.929:     win-wasapi.dll
+04:54:51.929:     win-dshow.dll
+04:54:51.929:     win-capture.dll
+04:54:51.929:     vlc-video.dll
+04:54:51.929:     text-freetype2.dll
+04:54:51.929:     rtmp-services.dll
+04:54:51.929:     obs-x264.dll
+04:54:51.929:     obs-websocket.dll
+04:54:51.929:     obs-webrtc.dll
+04:54:51.929:     obs-vst.dll
+04:54:51.929:     obs-transitions.dll
+04:54:51.929:     obs-text.dll
+04:54:51.929:     obs-smooth-media.dll
+04:54:51.929:     obs-qsv11.dll
+04:54:51.929:     obs-outputs.dll
+04:54:51.929:     obs-multi-rtmp.dll
+04:54:51.929:     obs-filters.dll
+04:54:51.929:     obs-ffmpeg.dll
+04:54:51.929:     obs-browser.dll
+04:54:51.929:     nv-filters.dll
+04:54:51.929:     multi-streamer.dll
+04:54:51.929:     irl-audio-return.dll
+04:54:51.929:     image-source.dll
+04:54:51.929:     frontend-tools.dll
+04:54:51.929:     decklink-output-ui.dll
+04:54:51.929:     decklink-captions.dll
+04:54:51.929:     coreaudio-encoder.dll
+04:54:51.929: ---------------------------------
+04:54:51.929: [obs-websocket] [obs_module_post_load] WebSocket server is enabled, starting...
+04:54:51.929: [obs-websocket] [WebSocketServer::Start] Not locked to IPv4 bindings
+04:54:51.930: [obs-websocket] [WebSocketServer::ServerRunner] IO thread started.
+04:54:51.932: [obs-websocket] [WebSocketServer::Start] Server started successfully on port 3344. Possible connect address: 188.40.73.126
+04:54:51.932: [obs-smooth-media] WebSocket vendor API registered:
+04:54:51.932: [obs-smooth-media]   - SetStreamURL
+04:54:51.932: [obs-smooth-media]   - GetStreamURL
+04:54:51.932: [obs-smooth-media]   - GetStatus
+04:54:51.932: [obs-smooth-media]   - RestartSource
+04:54:51.932: [obs-smooth-media]   - ListSources
+04:54:51.932: [obs-multi-rtmp] plugin post-load starting
+04:54:51.932: [obs-multi-rtmp] Starting WebSocket vendor registration...
+04:54:51.932: [obs-multi-rtmp] Registering obs-websocket vendor API
+04:54:51.932: [obs-multi-rtmp] Successfully registered vendor, adding requests...
+04:54:51.932: [obs-multi-rtmp] obs-websocket vendor API initialized successfully
+04:54:51.932: [obs-multi-rtmp] Available vendor requests:
+04:54:51.932: [obs-multi-rtmp]   - GetPluginVersion
+04:54:51.932: [obs-multi-rtmp]   - GetMultiOutputList
+04:54:51.932: [obs-multi-rtmp]   - StartMultiOutput
+04:54:51.932: [obs-multi-rtmp]   - StopMultiOutput
+04:54:51.932: [obs-multi-rtmp]   - SetMultiOutputSettings
+04:54:51.932: [obs-multi-rtmp]   - CreateMultiOutputTarget
+04:54:51.932: [obs-multi-rtmp]   - DeleteMultiOutputTarget
+04:54:51.932: [obs-multi-rtmp] WebSocket vendor registration completed
+04:54:51.932: [obs-multi-rtmp] plugin post-load completed
+04:54:51.932: [multi-streamer] WebSocket vendor API registered
+04:54:51.950: ---------------------------------
+04:54:51.950: Available Encoders:
+04:54:51.950:   Video Encoders:
+04:54:51.950: 	- ffmpeg_svt_av1 (SVT-AV1)
+04:54:51.950: 	- ffmpeg_aom_av1 (AOM AV1)
+04:54:51.950: 	- obs_qsv11_v2 (QuickSync H.264)
+04:54:51.950: 	- obs_qsv11_hevc (QuickSync HEVC)
+04:54:51.950: 	- obs_x264 (x264)
+04:54:51.950:   Audio Encoders:
+04:54:51.950: 	- ffmpeg_aac (FFmpeg AAC)
+04:54:51.950: 	- ffmpeg_opus (FFmpeg Opus)
+04:54:51.950: 	- ffmpeg_pcm_s16le (FFmpeg PCM (16-bit))
+04:54:51.950: 	- ffmpeg_pcm_s24le (FFmpeg PCM (24-bit))
+04:54:51.950: 	- ffmpeg_pcm_f32le (FFmpeg PCM (32-bit float))
+04:54:51.950: 	- ffmpeg_alac (FFmpeg ALAC (24-bit))
+04:54:51.950: 	- ffmpeg_flac (FFmpeg FLAC (16-bit))
+04:54:51.950: ==== Startup complete ===============================================
+04:54:52.132: All scene data cleared
+04:54:52.132: ------------------------------------------------
+04:54:52.203: [Media Source 'SRT FEED']: settings:
+04:54:52.203: 	input:                   srt://172.238.7.67:8282?streamid=play/live/feed1
+04:54:52.203: 	input_format:            mpegts
+04:54:52.203: 	speed:                   100
+04:54:52.203: 	is_looping:              no
+04:54:52.203: 	is_linear_alpha:         no
+04:54:52.203: 	is_hw_decoding:          no
+04:54:52.203: 	is_clear_on_media_end:   yes
+04:54:52.203: 	restart_on_activate:     yes
+04:54:52.203: 	close_when_inactive:     yes
+04:54:52.203: 	full_decode:             no
+04:54:52.203: 	ffmpeg_options:          
+04:54:52.206: Switched to scene 'LIVE'
+04:54:52.206: ------------------------------------------------
+04:54:52.206: Loaded scenes:
+04:54:52.206: - scene 'Scene':
+04:54:52.206: - scene 'PC':
+04:54:52.206:     - source: 'ULLR FEED (Sub required)' (browser_source)
+04:54:52.206: - scene 'REFRESH':
+04:54:52.206:     - source: 'Refresh Logo' (browser_source)
+04:54:52.206:     - source: 'DO NOT DELETE, OBS CONTROLLER' (browser_source)
+04:54:52.206: - scene 'PRIVACY':
+04:54:52.206:     - source: 'Privacy mode' (text_gdiplus_v3)
+04:54:52.206:     - source: 'Background' (browser_source)
+04:54:52.206:     - source: 'BRB CLIPS' (browser_source)
+04:54:52.206: - scene 'BRB':
+04:54:52.206:     - source: 'Background' (browser_source)
+04:54:52.206:     - source: 'BRB CLIPS' (browser_source)
+04:54:52.206:     - source: 'Connection Error' (text_gdiplus_v3)
+04:54:52.206:     - source: 'DO NOT DELETE, OBS CONTROLLER' (browser_source)
+04:54:52.206: - scene 'LOW':
+04:54:52.206:     - source: 'Low Explanation' (text_gdiplus_v3)
+04:54:52.206:     - source: 'LIVE' (scene)
+04:54:52.206: - scene 'LIVE':
+04:54:52.206:     - source: 'SRT FEED' (ffmpeg_source)
+04:54:52.206:     - source: 'Smooth Media Source' (smooth_media_source)
+04:54:52.206: - scene 'PRESHOW':
+04:54:52.206:     - source: 'Starting Soon' (text_gdiplus_v3)
+04:54:52.206:     - source: 'Background' (browser_source)
+04:54:52.206:     - source: 'BRB CLIPS' (browser_source)
+04:54:52.206: ------------------------------------------------
+04:54:52.820: MP: Failed to open media: 'srt://172.238.7.67:8282?streamid=play/live/feed1'
+04:54:52.832: [Media Source 'SRT FEED']: Disconnected. Reconnecting...
+04:54:53.714: [obs-websocket] [WebSocketServer::onOpen] New WebSocket client has connected from [::ffff:46.224.186.45]:36156
+04:54:54.198: [obs-websocket] [WebSocketServer::onOpen] New WebSocket client has connected from [::1]:53918
+04:54:54.202: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:54:54.204: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:54:54.444: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:54:54.765: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:54.766: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified source is not an input. (https://development.irlremote.com/client.js:85)
+04:54:54.990: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.002: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.004: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.007: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.007: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.008: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified source is not an input. (https://development.irlremote.com/client.js:85)
+04:54:55.014: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.014: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.015: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.015: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.015: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.015: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified source is not an input. (https://development.irlremote.com/client.js:85)
+04:54:55.015: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.243: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.247: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.247: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified source is not an input. (https://development.irlremote.com/client.js:85)
+04:54:55.247: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.247: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.290: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.302: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.302: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified source is not an input. (https://development.irlremote.com/client.js:85)
+04:54:55.302: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:55.302: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:54:57.349: MP: Failed to find stream info for 'srt://172.238.7.67:8282?streamid=play/live/feed1'
+04:55:01.140: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:55:01.404: [Smooth Media Source 'Smooth Media Source']: Failed to open stream: srt://172.238.7.67:8282?streamid=play/live/feed1
+04:55:01.415: [Smooth Media Source 'Smooth Media Source']: Stream disconnected. Reconnecting every 3 seconds...
+04:55:04.416: [Smooth Media Source 'Smooth Media Source']: Reconnect attempt #1...
+04:55:06.427: MP: Failed to find stream info for 'srt://172.238.7.67:8282?streamid=play/live/feed1'
+04:55:11.146: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:55:21.151: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:55:31.146: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:55:36.366: [Smooth Media Source 'Smooth Media Source']: Reconnect attempt #10...
+04:55:41.141: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:55:44.965: MP: Failed to find stream info for 'srt://172.238.7.67:8282?streamid=play/live/feed1'
+04:55:51.141: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:55:54.041: MP: Failed to find stream info for 'srt://172.238.7.67:8282?streamid=play/live/feed1'
+04:56:11.766: [Smooth Media Source 'Smooth Media Source']: Reconnect attempt #20...
+04:56:12.214: MP: Failed to find stream info for 'srt://172.238.7.67:8282?streamid=play/live/feed1'
+04:56:33.550: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:56:34.106: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:56:34.121: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:56:34.121: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified source is not an input. (https://development.irlremote.com/client.js:85)
+04:56:34.125: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:56:34.130: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:56:44.141: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:56:48.966: [Smooth Media Source 'Smooth Media Source']: Reconnect attempt #30...
+04:56:50.350: [Smooth Media Source 'Smooth Media Source']: Reconnected after 30 attempts: srt://172.238.7.67:8282?streamid=play/live/feed1
+04:56:50.350: [Smooth Media Source 'Smooth Media Source']: First audio frame: 44100Hz 2ch 1024 samples pts=1713ms
+04:56:50.350: [Smooth Media Source 'Smooth Media Source']: Jitter buffer primed (92ms buffered)
+04:56:50.366: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0000 adj_sr=44100 buf=208ms tgt=108ms av_wall=0ms a_out=1 v_out=0
+04:56:50.376: [Smooth Media Source 'Smooth Media Source']: Audio buffer overflow: dropped 1 frame(s) (total dropped: 1, buffered: 394ms)
+04:56:50.388: [Smooth Media Source 'Smooth Media Source']: First video frame: 1920x1080 fmt=0 pts=1966ms
+04:56:54.140: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:56:55.366: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0818 adj_sr=45533 buf=69ms tgt=99ms av_wall=-47ms a_out=227 v_out=156
+04:56:57.609: >>> new qsv encoder
+04:56:57.609: [qsv encoder: 'simple_video_stream'] settings:
+04:56:57.609: 	codec:          H.264
+04:56:57.609: 	rate_control:   CBR
+04:56:57.609: 	target_bitrate: 6000
+04:56:57.609: 	Lookahead Depth:60
+04:56:57.609: 	target_usage:   TU4
+04:56:57.609: 	profile:        high
+04:56:57.609: 	keyint:         2
+04:56:57.609: 	latency:        normal
+04:56:57.609: 	b-frames:       3
+04:56:57.609: 	fps_num:        60
+04:56:57.609: 	fps_den:        1
+04:56:57.609: 	width:          1920
+04:56:57.609: 	height:         1080
+04:56:57.609: [qsv encoder: 'simple_video_stream'] debug info:
+04:56:57.653: 	surf:           Texture
+04:56:57.724: 	m_nSurfNum:     12
+04:56:57.725: 	m_nTaskPool:    4
+04:56:57.725: 	major:          1
+04:56:57.725: 	minor:          27
+04:56:57.725: ---------------------------------
+04:56:57.726: [FFmpeg aac encoder: 'simple_aac'] bitrate: 160, channels: 2, channel_layout: stereo, track: 1
+04:56:57.726: 
+04:56:57.726: [rtmp stream: 'simple_stream'] Connecting to RTMP URL rtmp://ingest.global-contribute.live-video.net/app...
+04:56:57.766: [rtmp stream: 'simple_stream'] Interface: Intel(R) Ethernet Connection (2) I219-LM (ethernet, 1000↓/1000↑ mbps)
+04:56:58.692: [rtmp stream: 'simple_stream'] Connection to rtmp://ingest.global-contribute.live-video.net/app (35.55.18.29) successful
+04:56:58.692: [rtmp stream: 'simple_stream'] Socket send buffer is 131072 bytes
+04:56:58.698: ==== Streaming Start ===============================================
+04:57:00.383: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0148 adj_sr=44753 buf=69ms tgt=99ms av_wall=-111ms a_out=443 v_out=307
+04:57:01.071: adding 21 milliseconds of audio buffering, total audio buffering is now 21 milliseconds (source: Smooth Media Source)
+04:57:01.071: 
+04:57:04.151: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:57:05.400: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0028 adj_sr=44222 buf=69ms tgt=88ms av_wall=-86ms a_out=659 v_out=457
+04:57:10.416: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0005 adj_sr=44121 buf=92ms tgt=93ms av_wall=-122ms a_out=874 v_out=606
+04:57:10.608: adding 21 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: Smooth Media Source)
+04:57:10.608: 
+04:57:14.150: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:57:15.432: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0000 adj_sr=44102 buf=92ms tgt=97ms av_wall=-98ms a_out=1090 v_out=756
+04:57:16.262: [rtmp stream: 'simple_stream'] User stopped the stream
+04:57:16.262: [rtmp stream: 'simple_stream'] Socket send buffer is 262144 bytes
+04:57:16.262: Output 'simple_stream': stopping
+04:57:16.262: Output 'simple_stream': Total frames output: 1043
+04:57:16.262: Output 'simple_stream': Total drawn frames: 1112
+04:57:16.265: ==== Streaming Stop ================================================
+04:57:20.432: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0004 adj_sr=44118 buf=92ms tgt=108ms av_wall=-100ms a_out=1305 v_out=906
+04:57:24.145: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:57:25.466: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0005 adj_sr=44123 buf=92ms tgt=100ms av_wall=-89ms a_out=1522 v_out=1057
+04:57:30.483: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0004 adj_sr=44118 buf=92ms tgt=100ms av_wall=-104ms a_out=1738 v_out=1208
+04:57:33.530: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:57:34.080: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:57:34.105: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:57:34.105: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified source is not an input. (https://development.irlremote.com/client.js:85)
+04:57:34.332: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:57:34.332: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:57:35.499: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0002 adj_sr=44111 buf=92ms tgt=90ms av_wall=-85ms a_out=1954 v_out=1358
+04:57:40.516: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0003 adj_sr=44115 buf=92ms tgt=95ms av_wall=-98ms a_out=2170 v_out=1509
+04:57:44.161: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:57:45.533: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0004 adj_sr=44118 buf=92ms tgt=96ms av_wall=-82ms a_out=2386 v_out=1659
+04:57:50.549: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0006 adj_sr=44128 buf=116ms tgt=101ms av_wall=-98ms a_out=2602 v_out=1810
+04:57:54.150: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:57:55.549: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0006 adj_sr=44126 buf=92ms tgt=95ms av_wall=-79ms a_out=2818 v_out=1960
+04:58:00.549: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0005 adj_sr=44121 buf=92ms tgt=97ms av_wall=-87ms a_out=3033 v_out=2110
+04:58:04.200: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:58:05.566: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0004 adj_sr=44117 buf=116ms tgt=94ms av_wall=-71ms a_out=3249 v_out=2260
+04:58:10.583: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0000 adj_sr=44102 buf=92ms tgt=88ms av_wall=-90ms a_out=3465 v_out=2411
+04:58:14.170: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:58:15.600: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0002 adj_sr=44111 buf=116ms tgt=94ms av_wall=-74ms a_out=3681 v_out=2561
+04:58:20.616: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0003 adj_sr=44112 buf=92ms tgt=91ms av_wall=-89ms a_out=3897 v_out=2712
+04:58:24.160: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:58:25.633: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0005 adj_sr=44121 buf=116ms tgt=105ms av_wall=-75ms a_out=4113 v_out=2862
+04:58:30.649: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0005 adj_sr=44122 buf=92ms tgt=99ms av_wall=-94ms a_out=4329 v_out=3013
+04:58:33.520: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:58:33.617: adding 42 milliseconds of audio buffering, total audio buffering is now 85 milliseconds (source: Smooth Media Source)
+04:58:33.617: 
+04:58:34.041: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:58:34.041: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified source is not an input. (https://development.irlremote.com/client.js:85)
+04:58:34.045: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:58:34.046: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:58:34.055: [obs-browser: 'DO NOT DELETE, OBS CONTROLLER'] Error: [Client] OBS call error: Error: The specified input does not support audio. (https://development.irlremote.com/client.js:85)
+04:58:35.666: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=0.9998 adj_sr=44090 buf=232ms tgt=247ms av_wall=-279ms a_out=4539 v_out=3163
+04:58:40.666: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0012 adj_sr=44152 buf=255ms tgt=139ms av_wall=-181ms a_out=4755 v_out=3313
+04:58:44.150: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:58:45.683: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0007 adj_sr=44130 buf=208ms tgt=104ms av_wall=-104ms a_out=4971 v_out=3463
+04:58:50.699: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0003 adj_sr=44114 buf=208ms tgt=103ms av_wall=-109ms a_out=5187 v_out=3614
+04:58:54.170: [obs-multi-rtmp] WebSocket: Listed 0 targets
+04:58:55.716: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0004 adj_sr=44120 buf=232ms tgt=100ms av_wall=-116ms a_out=5403 v_out=3765
+04:59:00.733: [Smooth Media Source 'Smooth Media Source']: DIAG: rate=1.0003 adj_sr=44114 buf=232ms tgt=104ms av_wall=-95ms a_out=5619 v_out=3915

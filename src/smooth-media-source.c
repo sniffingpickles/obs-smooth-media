@@ -14,8 +14,11 @@
 #define NETWORK_BUFFER_MB   2
 #define JITTER_BUFFER_MS    80
 #define MAX_BUFFER_MS       500
-#define SR_WARMUP_NS        (5000000000LL) /* 5s: hold rate at 1.0x while the clock tracker settles */
+#define SR_WARMUP_NS        (8000000000LL) /* 8s: hold rate at 1.0x until the post-connect burst ages out of the clock window */
 #define SR_SLEW_PER_POP     0.0005         /* max declared-rate change per popped frame (~2.3%/s) — no audible pitch steps */
+#define SR_SLOW_ALPHA       0.0015         /* per-tick EMA on the drift estimate (~11s TC) — rejects jitter-induced rate wobble so the declared rate stays put */
+#define SR_UPDATE_DEADBAND_HZ 40.0         /* only re-declare sample rate after it drifts this far — keeps OBS's resampler from resetting (which clicks) */
+#define SR_MIN_HOLD_NS      (2000000000LL) /* and never re-declare more often than this */
 
 /* Forward declarations */
 static void smooth_media_update(void *data, obs_data_t *settings);
@@ -444,6 +447,9 @@ static void start_media(struct smooth_media_source *s)
 	s->last_diag_time = 0;
 	s->stream_start_time = (int64_t)os_gettime_ns();
 	s->sr_ratio = 1.0;
+	s->sr_slow_rate = 1.0;
+	s->declared_sr = 0;
+	s->last_sr_change_ns = 0;
 	s->last_audio_pop_time = 0;
 	s->audio_frame_dur_ns = 0;
 	s->prev_video_pts = 0;
@@ -863,9 +869,14 @@ static void smooth_media_tick(void *data, float seconds)
 		 * delivery pace. No deadzone (small drift is corrected too) and
 		 * no round-to-100 (which caused ~2kHz/4% audible pitch steps);
 		 * the per-pop slew limit keeps changes inaudible. */
+		/* Heavily smooth the drift estimate so jitter-induced wobble in
+		 * the measured rate doesn't keep nudging the declared rate
+		 * (which would reset OBS's resampler and click). Real clock
+		 * drift is slow and constant, so a long time-constant is fine. */
+		s->sr_slow_rate += SR_SLOW_ALPHA * (rate - s->sr_slow_rate);
 		bool in_warmup =
 			(wall_now - s->stream_start_time) < SR_WARMUP_NS;
-		double desired_ratio = in_warmup ? 1.0 : rate;
+		double desired_ratio = in_warmup ? 1.0 : s->sr_slow_rate;
 		if (desired_ratio < 0.95)
 			desired_ratio = 0.95;
 		if (desired_ratio > 1.05)
@@ -931,10 +942,25 @@ static void smooth_media_tick(void *data, float seconds)
 				dr = -SR_SLEW_PER_POP;
 			s->sr_ratio += dr;
 
-			uint32_t adjusted_sample_rate = (uint32_t)(
-				(double)buf_frame->sample_rate *
-					s->sr_ratio +
-				0.5);
+			/* Declared sample rate is held STABLE via a deadband:
+			 * OBS rebuilds its resampler whenever samples_per_sec
+			 * changes, which clicks. So we only re-declare once the
+			 * ideal rate has drifted >=25Hz from what OBS currently
+			 * has — in steady state it never changes (zero clicks),
+			 * and any change is an inaudible <0.06% step. */
+			double exact = (double)buf_frame->sample_rate *
+				       s->sr_ratio;
+			if (s->declared_sr == 0) {
+				s->declared_sr = (uint32_t)(exact + 0.5);
+				s->last_sr_change_ns = wall_now;
+			} else if (fabs(exact - (double)s->declared_sr) >=
+					   SR_UPDATE_DEADBAND_HZ &&
+				   (wall_now - s->last_sr_change_ns) >=
+					   SR_MIN_HOLD_NS) {
+				s->declared_sr = (uint32_t)(exact + 0.5);
+				s->last_sr_change_ns = wall_now;
+			}
+			uint32_t adjusted_sample_rate = s->declared_sr;
 
 			/* ── Timestamp computation ──
 			 * sync_pts ON : 1 % drift correction + wall

@@ -55,7 +55,7 @@ The plugin uses a self-tuning, closed-loop pipeline to keep playback smooth — 
 
 - **Adaptive Jitter Buffer** — Starts at 80ms and automatically grows with the link's measured jitter and recent dropouts (up to a bounded latency ceiling), then shrinks again when the connection calms down. Rough cellular links get a deeper cushion; clean links stay low-latency. Zero knobs.
 
-- **Continuous Sample-Rate Matching** — The declared audio sample rate is nudged continuously (slew-limited, no steps) so OBS consumes audio at the stream's true pace. No deadzone, no resampling artifacts, no pitch steps — just seamless pacing.
+- **Stable Sample-Rate Matching** — The declared audio sample rate is nudged toward the stream's true pace via a heavily-smoothed drift estimate, then *held stable* (changed only after meaningful drift, never more than occasionally). This keeps OBS's audio resampler from resetting — which is what caused periodic clicking — while still correcting long-term drift. No deadzone, no audible pitch steps.
 
 Video frame timestamps use PTS-delta stepping from the encoder for perfectly even frame spacing (e.g. exactly 16.667ms for 60fps), offset to match the audio buffer depth so lips stay synced, with a gentle drift correction over long sessions.
 
