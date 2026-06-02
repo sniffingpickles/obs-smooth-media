@@ -37,10 +37,13 @@ This is a [known OBS issue](https://github.com/obsproject/obs-studio/issues/1272
 | **Stream URL** | — | Any RTMP, SRT, or RIST stream URL |
 | **Input Format** | *(auto)* | Force a specific container format (e.g. `mpegts`), usually not needed |
 | **Reconnect Delay** | 10 s | How long to wait before retrying after a disconnect |
-| **Hardware Decoding** | Off | Use GPU-accelerated decoding (if available) |
+| **Hardware Decoding** | Off | GPU-accelerated video decoding (D3D11VA / NVDEC / QSV / VAAPI). Automatically falls back to software if the GPU path is unavailable. |
+| **Sync A/V via PTS** | Off | Lock audio tightly to the video timeline using presentation timestamps. |
+| **Close When Inactive** | On | Disconnect when the source is hidden or on another scene to save CPU, bandwidth, and server resources. |
+| **Disable Video Preview** | Off | Audio-only mode: keep the stream connected and audio playing, but stop sending video to OBS. Handy when working over a slow remote-desktop session. Applies instantly without reconnecting. |
 | **FFmpeg Options** | — | Advanced: additional FFmpeg demuxer/decoder options |
 
-The plugin automatically handles network buffering, audio jitter absorption, and clock drift correction — no manual tuning required.
+The plugin automatically handles network buffering, audio jitter absorption, and clock drift correction — no manual tuning required. Playback-only toggles (sync, audio-only, close-when-inactive, reconnect delay) apply live and never interrupt the stream.
 
 ## How It Works
 

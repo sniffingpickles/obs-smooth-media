@@ -23,9 +23,13 @@
  * Stream Decoder — FFmpeg-based demuxer/decoder for live streams.
  *
  * This replaces OBS's built-in media-playback with a design that:
- * - Runs av_read_frame on a dedicated I/O thread (non-blocking to playback)
- * - Decodes audio/video on the playback thread
- * - Provides decoded frames with accurate PTS to the caller
+ * - Demuxes (av_read_frame) and decodes on a single media thread, driven
+ *   by stream_decoder_read_next() called in a loop by the caller
+ * - Pushes decoded frames to the caller via callbacks; pacing/jitter
+ *   absorption is handled downstream by the audio jitter buffer, not here
+ * - Provides decoded frames with accurate PTS (in nanoseconds)
+ * - Optionally decodes video on the GPU (hardware acceleration) with an
+ *   automatic fall back to software decoding when unavailable
  */
 
 struct decoded_video_frame {
@@ -74,15 +78,15 @@ struct stream_decode_ctx {
 	AVStream *stream;
 	AVCodecContext *decoder;
 	const AVCodec *codec;
-	AVFrame *frame;
-	AVFrame *sw_frame;
-	AVFrame *hw_frame;
-	AVBufferRef *hw_ctx;
+	AVFrame *frame;       /* receives decoded frames (may be GPU memory) */
+	AVFrame *sw_frame;    /* hw mode: download target for GPU frames */
+	AVBufferRef *hw_ctx;  /* hw device context (NULL in software mode) */
+	enum AVPixelFormat hw_pix_fmt; /* the GPU surface format to negotiate */
 	int64_t last_pts_ns;
 	int64_t next_pts_ns;
 	bool got_first_keyframe;
 	bool audio;
-	bool hw;
+	bool hw;              /* true once hardware decoding is active */
 	uint16_t max_luminance;
 };
 
@@ -108,9 +112,6 @@ struct stream_decoder {
 	/* Threading */
 	volatile bool running;
 	volatile bool kill;
-
-	/* Interrupt callback state */
-	uint64_t interrupt_poll_ts;
 };
 
 /* Create and open the stream. Returns NULL on failure. */
@@ -129,3 +130,6 @@ void stream_decoder_request_stop(struct stream_decoder *sd);
 
 /* Check if decoder has been signaled to stop */
 bool stream_decoder_should_stop(const struct stream_decoder *sd);
+
+/* Release process-global FFmpeg network state. Call once on module unload. */
+void stream_decoder_global_cleanup(void);

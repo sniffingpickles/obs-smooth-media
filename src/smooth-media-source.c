@@ -123,6 +123,12 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 		s->got_first_keyframe = true;
 	}
 
+	/* Audio-only mode: keep decoding (so video resumes instantly when
+	 * re-enabled, with valid reference frames) but don't push video to
+	 * OBS. Lets you test audio over a slow remote-desktop session. */
+	if (s->disable_video)
+		return;
+
 	/* NOTE: we intentionally do NOT feed video PTS into the clock
 	 * tracker.  Video decoding is susceptible to GPU-contention
 	 * bursts (e.g. when multiple NVENC sessions are running),
@@ -545,6 +551,7 @@ static void smooth_media_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "hw_decode", false);
 	obs_data_set_default_bool(settings, "sync_pts", false);
 	obs_data_set_default_bool(settings, "close_when_inactive", true);
+	obs_data_set_default_bool(settings, "disable_video", false);
 }
 
 static obs_properties_t *smooth_media_get_properties(void *data)
@@ -612,6 +619,15 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 		"hidden or on another scene. Saves CPU, bandwidth,\n"
 		"and server resources.");
 
+	p = obs_properties_add_bool(play, "disable_video",
+				    "Disable Video Preview (Audio Only)");
+	obs_property_set_long_description(p,
+		"Stop sending video to OBS while keeping the stream\n"
+		"connected and audio playing. Useful when working over\n"
+		"a remote desktop session, where rendering the preview\n"
+		"is slow — toggle this on to test audio without the\n"
+		"video preview. Applies instantly without reconnecting.");
+
 	obs_properties_add_group(props, "grp_playback",
 				 "Playback", OBS_GROUP_NORMAL, play);
 
@@ -663,6 +679,7 @@ static void smooth_media_destroy(void *data)
 	stop_media_thread(s);
 
 	audio_buffer_free(&s->audio_buf);
+	clock_tracker_free(&s->clock);
 
 	pthread_mutex_destroy(&s->reconnect_mutex);
 	pthread_mutex_destroy(&s->state_mutex);
@@ -672,6 +689,16 @@ static void smooth_media_destroy(void *data)
 	bfree(s->input_format);
 	bfree(s->ffmpeg_options);
 	bfree(s);
+}
+
+/* Compare two possibly-NULL strings for inequality. */
+static bool str_changed(const char *a, const char *b)
+{
+	if (!a && !b)
+		return false;
+	if (!a || !b)
+		return true;
+	return strcmp(a, b) != 0;
 }
 
 static void smooth_media_update(void *data, obs_data_t *settings)
@@ -684,30 +711,56 @@ static void smooth_media_update(void *data, obs_data_t *settings)
 	const char *fmt = obs_data_get_string(settings, "input_format");
 	const char *opts = obs_data_get_string(settings, "ffmpeg_options");
 
+	char *new_url = (url && *url) ? bstrdup(url) : NULL;
+	char *new_fmt = (fmt && *fmt) ? bstrdup(fmt) : NULL;
+	char *new_opts = (opts && *opts) ? bstrdup(opts) : NULL;
+	bool new_hw = obs_data_get_bool(settings, "hw_decode");
+
+	/* Only the settings that affect the decoder pipeline force a
+	 * reconnect. Playback-only toggles (sync_pts, disable_video,
+	 * close_when_inactive, reconnect delay) apply live so flipping
+	 * them never interrupts the stream. */
+	bool stream_changed = str_changed(s->url, new_url) ||
+			      str_changed(s->input_format, new_fmt) ||
+			      str_changed(s->ffmpeg_options, new_opts) ||
+			      s->hw_decode != new_hw;
+
 	bfree(s->url);
 	bfree(s->input_format);
 	bfree(s->ffmpeg_options);
+	s->url = new_url;
+	s->input_format = new_fmt;
+	s->ffmpeg_options = new_opts;
+	s->hw_decode = new_hw;
 
-	s->url = url ? bstrdup(url) : NULL;
-	s->input_format = (fmt && *fmt) ? bstrdup(fmt) : NULL;
-	s->ffmpeg_options = (opts && *opts) ? bstrdup(opts) : NULL;
-	s->hw_decode = obs_data_get_bool(settings, "hw_decode");
 	s->sync_pts = obs_data_get_bool(settings, "sync_pts");
 	s->close_when_inactive = obs_data_get_bool(settings, "close_when_inactive");
+	s->disable_video = obs_data_get_bool(settings, "disable_video");
 	s->reconnect_delay_sec = (int)obs_data_get_int(settings, "reconnect_delay_sec");
 
 	if (s->reconnect_delay_sec < 1)
 		s->reconnect_delay_sec = 10;
 
-	/* Restart stream with new settings.
-	 * If close_when_inactive, only start when visible. */
-	if (s->url && *s->url) {
-		if (!s->close_when_inactive ||
-		    obs_source_showing(s->source))
+	bool should_run = s->url && *s->url &&
+			  (!s->close_when_inactive ||
+			   obs_source_showing(s->source));
+
+	if (!s->url || !*s->url) {
+		stop_media_thread(s);
+	} else if (stream_changed) {
+		if (should_run)
 			start_media(s);
-	} else {
+		else
+			stop_media_thread(s);
+	} else if (should_run && !s->active && !s->media_thread_valid) {
+		start_media(s);
+	} else if (!should_run && s->active) {
 		stop_media_thread(s);
 	}
+
+	/* Blank the preview immediately when switching to audio-only. */
+	if (s->disable_video)
+		obs_source_output_video(s->source, NULL);
 }
 
 static void smooth_media_activate(void *data)
@@ -884,16 +937,16 @@ static void smooth_media_tick(void *data, float seconds)
 						s->audio_next_ts =
 							wall_now;
 
+					/* sync_pts: pull toward wall clock —
+					 * 10% when ahead (snap back), a
+					 * constant 1% when behind for a
+					 * tight A/V lock. */
 					int64_t drift_error =
 						wall_now -
 						s->audio_next_ts;
 					if (drift_error < 0)
 						s->audio_next_ts +=
 							drift_error / 10;
-					else if (drift_error >
-						 100000000LL)
-						s->audio_next_ts +=
-							drift_error / 100;
 					else
 						s->audio_next_ts +=
 							drift_error / 100;

@@ -2,43 +2,77 @@
 
 #include <libavdevice/avdevice.h>
 #include <libavutil/mastering_display_metadata.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/pixdesc.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
-#include <windows.h>
-static inline uint64_t sd_gettime_ns(void)
-{
-	LARGE_INTEGER freq, cnt;
-	QueryPerformanceFrequency(&freq);
-	QueryPerformanceCounter(&cnt);
-	return (uint64_t)(cnt.QuadPart * 1000000000ULL / freq.QuadPart);
-}
-#else
-#include <time.h>
-static inline uint64_t sd_gettime_ns(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-#endif
-
 static bool sd_initialized = false;
 
+/* Aborts blocking FFmpeg I/O (av_read_frame, avformat_open_input) when the
+ * source is being torn down. Called repeatedly by FFmpeg while it waits on
+ * the network, so it must be cheap and non-blocking. */
 static int interrupt_callback(void *data)
 {
 	struct stream_decoder *sd = data;
-	if (sd->kill)
-		return 1;
+	return sd->kill ? 1 : 0;
+}
 
-	uint64_t ts = sd_gettime_ns();
-	if ((ts - sd->interrupt_poll_ts) > 20000000) {
-		sd->interrupt_poll_ts = ts;
-		if (sd->kill)
-			return 1;
+/* get_format callback: tell the decoder to use our negotiated GPU surface
+ * format when offered, otherwise fall back to the first software format so
+ * decoding continues on the CPU instead of failing outright. */
+static enum AVPixelFormat sd_get_hw_format(AVCodecContext *avctx,
+					   const enum AVPixelFormat *fmts)
+{
+	struct stream_decode_ctx *ctx = avctx->opaque;
+
+	for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++) {
+		if (*p == ctx->hw_pix_fmt)
+			return *p;
 	}
-	return 0;
+
+	for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++) {
+		const AVPixFmtDescriptor *d = av_pix_fmt_desc_get(*p);
+		if (d && !(d->flags & AV_PIX_FMT_FLAG_HWACCEL))
+			return *p;
+	}
+
+	return fmts[0];
+}
+
+/* Try to attach a hardware device to the decoder. On any failure we leave
+ * ctx in software mode (ctx->hw stays false) so decoding still works. */
+static void try_enable_hw_decode(struct stream_decode_ctx *ctx)
+{
+	for (int i = 0;; i++) {
+		const AVCodecHWConfig *cfg = avcodec_get_hw_config(ctx->codec, i);
+		if (!cfg)
+			break;
+		if (!(cfg->methods &
+		      AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
+			continue;
+
+		AVBufferRef *hw_ctx = NULL;
+		if (av_hwdevice_ctx_create(&hw_ctx, cfg->device_type, NULL,
+					   NULL, 0) < 0)
+			continue;
+
+		ctx->hw_ctx = hw_ctx;
+		ctx->hw_pix_fmt = cfg->pix_fmt;
+		ctx->decoder->hw_device_ctx = av_buffer_ref(hw_ctx);
+		ctx->decoder->opaque = ctx;
+		ctx->decoder->get_format = sd_get_hw_format;
+		ctx->sw_frame = av_frame_alloc();
+		if (!ctx->sw_frame) {
+			av_buffer_unref(&ctx->decoder->hw_device_ctx);
+			av_buffer_unref(&ctx->hw_ctx);
+			ctx->decoder->get_format = NULL;
+			ctx->decoder->opaque = NULL;
+			return;
+		}
+		ctx->hw = true;
+		return;
+	}
 }
 
 static uint16_t get_max_luminance(const AVStream *stream)
@@ -59,6 +93,8 @@ static uint16_t get_max_luminance(const AVStream *stream)
 	}
 	return (uint16_t)max_luminance;
 }
+
+static void free_decoder(struct stream_decode_ctx *ctx);
 
 static bool init_decoder(struct stream_decode_ctx *ctx, AVFormatContext *fmt,
 			 enum AVMediaType type, bool hw)
@@ -96,36 +132,40 @@ static bool init_decoder(struct stream_decode_ctx *ctx, AVFormatContext *fmt,
 	    id != AV_CODEC_ID_WEBP)
 		ctx->decoder->thread_count = 0;
 
+	/* Hardware decoding is video-only and best-effort: if no GPU device
+	 * can be attached, try_enable_hw_decode() leaves us in software mode. */
+	if (type == AVMEDIA_TYPE_VIDEO && hw)
+		try_enable_hw_decode(ctx);
+
 	ret = avcodec_open2(ctx->decoder, ctx->codec, NULL);
 	if (ret < 0) {
-		avcodec_free_context(&ctx->decoder);
+		free_decoder(ctx);
 		return false;
 	}
 
 	ctx->frame = av_frame_alloc();
-	ctx->sw_frame = ctx->frame;
 	if (!ctx->frame) {
-		avcodec_free_context(&ctx->decoder);
+		free_decoder(ctx);
 		return false;
 	}
+	if (!ctx->hw)
+		ctx->sw_frame = ctx->frame;
 
 	return true;
 }
 
 static void free_decoder(struct stream_decode_ctx *ctx)
 {
-	if (ctx->frame) {
+	/* In software mode sw_frame aliases frame; only free it separately
+	 * when hardware decoding allocated a distinct download target. */
+	if (ctx->sw_frame && ctx->sw_frame != ctx->frame)
+		av_frame_free(&ctx->sw_frame);
+	if (ctx->frame)
 		av_frame_free(&ctx->frame);
-	}
-	if (ctx->hw_frame) {
-		av_frame_free(&ctx->hw_frame);
-	}
-	if (ctx->decoder) {
+	if (ctx->decoder)
 		avcodec_free_context(&ctx->decoder);
-	}
-	if (ctx->hw_ctx) {
+	if (ctx->hw_ctx)
 		av_buffer_unref(&ctx->hw_ctx);
-	}
 	memset(ctx, 0, sizeof(*ctx));
 }
 
@@ -172,11 +212,15 @@ struct stream_decoder *stream_decoder_create(
 		sd->fmt_ctx->flags |= AVFMT_FLAG_NOBUFFER;
 	}
 
-	/* Set protocol-appropriate timeouts for network streams.
-	 * stimeout is RTMP-specific; SRT and RIST use different options. */
+	/* Set protocol-appropriate timeouts (microseconds) for network
+	 * streams. The TCP/RTMP socket timeout option was renamed from the
+	 * legacy "stimeout" to "timeout" in modern FFmpeg; set both plus
+	 * rw_timeout so we work across versions. Unknown keys are ignored. */
 	if (sd->url) {
 		if (strncmp(sd->url, "rtmp", 4) == 0) {
+			av_dict_set(&opts, "timeout", "30000000", 0);
 			av_dict_set(&opts, "stimeout", "30000000", 0);
+			av_dict_set(&opts, "rw_timeout", "30000000", 0);
 		} else if (strncmp(sd->url, "srt", 3) == 0) {
 			av_dict_set(&opts, "timeout", "30000000", 0);
 		} else if (strncmp(sd->url, "rist", 4) == 0) {
@@ -235,12 +279,10 @@ void stream_decoder_destroy(struct stream_decoder *sd)
 }
 
 static void deliver_video_frame(struct stream_decoder *sd,
-				struct stream_decode_ctx *ctx)
+				struct stream_decode_ctx *ctx, AVFrame *f)
 {
 	if (!sd->video_cb)
 		return;
-
-	AVFrame *f = ctx->sw_frame;
 
 	struct decoded_video_frame vf;
 	memset(&vf, 0, sizeof(vf));
@@ -292,12 +334,10 @@ static void deliver_video_frame(struct stream_decoder *sd,
 }
 
 static void deliver_audio_frame(struct stream_decoder *sd,
-				struct stream_decode_ctx *ctx)
+				struct stream_decode_ctx *ctx, AVFrame *f)
 {
 	if (!sd->audio_cb)
 		return;
-
-	AVFrame *f = ctx->frame;
 
 	struct decoded_audio_frame af;
 	memset(&af, 0, sizeof(af));
@@ -363,12 +403,29 @@ static bool decode_packet(struct stream_decoder *sd,
 			ctx->got_first_keyframe = true;
 		}
 
-		if (ctx->audio) {
-			deliver_audio_frame(sd, ctx);
-		} else {
-			deliver_video_frame(sd, ctx);
+		/* If the frame lives in GPU memory, download it to system
+		 * memory before handing it to OBS. On transfer failure we
+		 * drop the frame rather than feed OBS a GPU surface. */
+		AVFrame *out = ctx->frame;
+		if (ctx->hw && ctx->frame->format == ctx->hw_pix_fmt) {
+			av_frame_unref(ctx->sw_frame);
+			if (av_hwframe_transfer_data(ctx->sw_frame, ctx->frame,
+						     0) < 0) {
+				av_frame_unref(ctx->frame);
+				continue;
+			}
+			av_frame_copy_props(ctx->sw_frame, ctx->frame);
+			out = ctx->sw_frame;
 		}
 
+		if (ctx->audio) {
+			deliver_audio_frame(sd, ctx, out);
+		} else {
+			deliver_video_frame(sd, ctx, out);
+		}
+
+		if (out != ctx->frame)
+			av_frame_unref(out);
 		av_frame_unref(ctx->frame);
 	}
 
@@ -417,4 +474,12 @@ void stream_decoder_request_stop(struct stream_decoder *sd)
 bool stream_decoder_should_stop(const struct stream_decoder *sd)
 {
 	return sd ? sd->kill : true;
+}
+
+void stream_decoder_global_cleanup(void)
+{
+	if (sd_initialized) {
+		avformat_network_deinit();
+		sd_initialized = false;
+	}
 }

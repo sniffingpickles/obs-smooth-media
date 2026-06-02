@@ -1,6 +1,6 @@
 #pragma once
 
-#define SMOOTH_MEDIA_VERSION "1.2.0"
+#define SMOOTH_MEDIA_VERSION "1.3.0"
 
 #include <obs-module.h>
 #include <util/threading.h>
@@ -28,6 +28,7 @@ struct smooth_media_source {
 	bool hw_decode;
 	bool sync_pts;
 	bool close_when_inactive;
+	volatile bool disable_video; /* audio-only: skip video output (eases remote testing) */
 	int reconnect_delay_sec;
 
 	/* Decoder */
@@ -41,7 +42,6 @@ struct smooth_media_source {
 	pthread_t media_thread;
 	bool media_thread_valid;
 	volatile bool active;
-	volatile bool stopping;
 	volatile bool kill;
 
 	/* Reconnection */

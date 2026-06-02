@@ -1,5 +1,6 @@
 #include <obs-module.h>
 #include "smooth-media-source.h"
+#include "stream-decoder.h"
 #include "websocket-api.h"
 
 OBS_DECLARE_MODULE()
@@ -25,5 +26,6 @@ void obs_module_post_load(void)
 
 void obs_module_unload(void)
 {
+	stream_decoder_global_cleanup();
 	blog(LOG_INFO, "[obs-smooth-media] Plugin unloaded");
 }

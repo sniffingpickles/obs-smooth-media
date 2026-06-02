@@ -52,6 +52,12 @@ struct audio_buffer {
 	int64_t total_buffered_ns; /* approximate total buffered duration */
 	int64_t last_output_pts;  /* PTS of last output frame */
 
+	/* Single-consumer staging frame. audio_buffer_pop() copies the
+	 * popped ring slot into this under the mutex and returns a pointer
+	 * to it, so the consumer thread can hand the data to OBS without
+	 * a concurrent producer-thread push corrupting it. */
+	struct audio_buf_frame out_frame;
+
 	/* Stats */
 	uint64_t frames_in;
 	uint64_t frames_out;

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <util/threading.h>
 
 /*
  * Clock Tracker — measures drift between stream PTS and wall clock.
@@ -41,22 +42,28 @@ struct clock_tracker {
 	/* Configuration */
 	int64_t window_ns;        /* measurement window size (default: 2 seconds) */
 	double ema_alpha;         /* EMA smoothing factor (default: 0.05) */
+
+	/* Guards cross-thread access: clock_tracker_record() runs on the
+	 * media thread while the smoothed rate is read on the OBS tick
+	 * thread. */
+	pthread_mutex_t mutex;
 };
 
 void clock_tracker_init(struct clock_tracker *ct);
+void clock_tracker_free(struct clock_tracker *ct);
 void clock_tracker_reset(struct clock_tracker *ct);
 
 /* Record a stream PTS observation paired with wall time */
 void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns, int64_t wall_time_ns);
 
 /* Get the current measured stream rate (< 1.0 means stream is slow) */
-double clock_tracker_get_rate(const struct clock_tracker *ct);
+double clock_tracker_get_rate(struct clock_tracker *ct);
 
 /* Get the smoothed rate suitable for output pacing */
-double clock_tracker_get_smoothed_rate(const struct clock_tracker *ct);
+double clock_tracker_get_smoothed_rate(struct clock_tracker *ct);
 
 /* Get accumulated drift in nanoseconds */
-int64_t clock_tracker_get_drift(const struct clock_tracker *ct);
+int64_t clock_tracker_get_drift(struct clock_tracker *ct);
 
 /* Given a stream PTS, compute the ideal wall-clock output time
  * accounting for measured drift. Returns adjusted timestamp in ns. */

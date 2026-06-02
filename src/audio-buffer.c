@@ -31,6 +31,7 @@ void audio_buffer_free(struct audio_buffer *ab)
 	pthread_mutex_destroy(&ab->mutex);
 	for (int i = 0; i < AUDIO_BUF_MAX_FRAMES; i++)
 		free_frame_data(&ab->frames[i]);
+	free_frame_data(&ab->out_frame);
 	memset(ab, 0, sizeof(*ab));
 }
 
@@ -162,7 +163,38 @@ bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out)
 		return false;
 	}
 
-	*out = f;
+	/* Copy the popped frame into the staging buffer while we hold the
+	 * lock. The ring slot can be reused by a concurrent push the moment
+	 * we unlock, so the consumer must operate on its own copy. */
+	struct audio_buf_frame *o = &ab->out_frame;
+	for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++) {
+		if (f->data[i] && f->data_size[i] > 0) {
+			if (o->data_size[i] < f->data_size[i]) {
+				free(o->data[i]);
+				o->data[i] = malloc(f->data_size[i]);
+				if (!o->data[i]) {
+					o->data_size[i] = 0;
+					pthread_mutex_unlock(&ab->mutex);
+					return false;
+				}
+			}
+			memcpy(o->data[i], f->data[i], f->data_size[i]);
+			o->data_size[i] = f->data_size[i];
+		} else {
+			if (o->data[i]) {
+				free(o->data[i]);
+				o->data[i] = NULL;
+			}
+			o->data_size[i] = 0;
+		}
+	}
+	o->frames = f->frames;
+	o->sample_rate = f->sample_rate;
+	o->channels = f->channels;
+	o->pts_ns = f->pts_ns;
+	o->format = f->format;
+	o->speakers = f->speakers;
+	o->valid = true;
 
 	ab->last_output_pts = f->pts_ns;
 	ab->total_buffered_ns -= frame_duration_ns(f->frames, f->sample_rate);
@@ -177,6 +209,7 @@ bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out)
 	 * Un-priming on empty caused a stutter cycle: fill 500ms → burst
 	 * drain → silence while re-filling → repeat every 500ms. */
 
+	*out = o;
 	pthread_mutex_unlock(&ab->mutex);
 	return true;
 }

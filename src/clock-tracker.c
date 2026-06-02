@@ -12,20 +12,38 @@ void clock_tracker_init(struct clock_tracker *ct)
 	ct->smoothed_rate = 1.0;
 	ct->window_ns = DEFAULT_WINDOW_NS;
 	ct->ema_alpha = DEFAULT_EMA_ALPHA;
+	pthread_mutex_init(&ct->mutex, NULL);
+}
+
+void clock_tracker_free(struct clock_tracker *ct)
+{
+	pthread_mutex_destroy(&ct->mutex);
 }
 
 void clock_tracker_reset(struct clock_tracker *ct)
 {
-	int64_t window = ct->window_ns;
-	double alpha = ct->ema_alpha;
-	clock_tracker_init(ct);
-	ct->window_ns = window;
-	ct->ema_alpha = alpha;
+	pthread_mutex_lock(&ct->mutex);
+
+	/* Reset measurement state but keep configuration and the mutex
+	 * intact (do NOT memset — that would clobber the live mutex). */
+	memset(ct->history, 0, sizeof(ct->history));
+	ct->history_count = 0;
+	ct->history_head = 0;
+	ct->stream_rate = 1.0;
+	ct->smoothed_rate = 1.0;
+	ct->drift_ns = 0;
+	ct->anchor_stream_ns = 0;
+	ct->anchor_wall_ns = 0;
+	ct->anchor_set = false;
+
+	pthread_mutex_unlock(&ct->mutex);
 }
 
 void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns,
 			  int64_t wall_time_ns)
 {
+	pthread_mutex_lock(&ct->mutex);
+
 	/* Set anchor on first sample */
 	if (!ct->anchor_set) {
 		ct->anchor_stream_ns = stream_pts_ns;
@@ -93,21 +111,32 @@ void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns,
 	int64_t stream_elapsed = stream_pts_ns - ct->anchor_stream_ns;
 	int64_t wall_elapsed = wall_time_ns - ct->anchor_wall_ns;
 	ct->drift_ns = wall_elapsed - stream_elapsed;
+
+	pthread_mutex_unlock(&ct->mutex);
 }
 
-double clock_tracker_get_rate(const struct clock_tracker *ct)
+double clock_tracker_get_rate(struct clock_tracker *ct)
 {
-	return ct->stream_rate;
+	pthread_mutex_lock(&ct->mutex);
+	double r = ct->stream_rate;
+	pthread_mutex_unlock(&ct->mutex);
+	return r;
 }
 
-double clock_tracker_get_smoothed_rate(const struct clock_tracker *ct)
+double clock_tracker_get_smoothed_rate(struct clock_tracker *ct)
 {
-	return ct->smoothed_rate;
+	pthread_mutex_lock(&ct->mutex);
+	double r = ct->smoothed_rate;
+	pthread_mutex_unlock(&ct->mutex);
+	return r;
 }
 
-int64_t clock_tracker_get_drift(const struct clock_tracker *ct)
+int64_t clock_tracker_get_drift(struct clock_tracker *ct)
 {
-	return ct->drift_ns;
+	pthread_mutex_lock(&ct->mutex);
+	int64_t d = ct->drift_ns;
+	pthread_mutex_unlock(&ct->mutex);
+	return d;
 }
 
 int64_t clock_tracker_adjust_timestamp(struct clock_tracker *ct,
