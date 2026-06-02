@@ -290,6 +290,11 @@ int64_t audio_buffer_target_ns(const struct audio_buffer *ab)
 	return ab->target_buffer_ns;
 }
 
+int64_t audio_buffer_jitter_ns(const struct audio_buffer *ab)
+{
+	return ab->jitter_ns;
+}
+
 bool audio_buffer_is_ready(const struct audio_buffer *ab)
 {
 	return ab->primed;

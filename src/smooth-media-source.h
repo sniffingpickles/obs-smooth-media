@@ -1,6 +1,6 @@
 #pragma once
 
-#define SMOOTH_MEDIA_VERSION "1.4.0"
+#define SMOOTH_MEDIA_VERSION "1.4.1"
 
 #include <obs-module.h>
 #include <util/threading.h>
@@ -29,6 +29,7 @@ struct smooth_media_source {
 	bool sync_pts;
 	bool close_when_inactive;
 	volatile bool disable_video; /* audio-only: skip video output (eases remote testing) */
+	volatile bool debug_logging; /* verbose per-second diagnostics + event logging */
 	int reconnect_delay_sec;
 
 	/* Decoder */
@@ -70,6 +71,9 @@ struct smooth_media_source {
 	int64_t last_overflow_log_time; /* wall time of last overflow log */
 	uint64_t pending_drop_count;   /* drops since last overflow log */
 	int64_t last_diag_time;        /* wall clock of last diagnostic log */
+	uint64_t underrun_count;       /* total drain underruns (debug) */
+	uint64_t sr_change_count;      /* total declared-sample-rate changes (debug) */
+	int64_t last_underrun_log_time; /* rate-limit for debug underrun logs */
 	int64_t stream_start_time;     /* wall clock when stream opened */
 	double sr_ratio;               /* slew-limited declared-sample-rate ratio (1.0 = no correction) */
 	double sr_slow_rate;           /* heavily-smoothed drift estimate that drives the declared rate */

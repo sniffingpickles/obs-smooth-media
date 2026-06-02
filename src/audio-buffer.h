@@ -101,6 +101,9 @@ int64_t audio_buffer_level_ns(const struct audio_buffer *ab);
 /* Get the current adaptive target depth in nanoseconds */
 int64_t audio_buffer_target_ns(const struct audio_buffer *ab);
 
+/* Get the current smoothed arrival-jitter estimate in nanoseconds */
+int64_t audio_buffer_jitter_ns(const struct audio_buffer *ab);
+
 /* Check if buffer is primed and ready to output */
 bool audio_buffer_is_ready(const struct audio_buffer *ab);
 

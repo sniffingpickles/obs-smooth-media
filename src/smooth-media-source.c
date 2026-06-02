@@ -445,6 +445,9 @@ static void start_media(struct smooth_media_source *s)
 	s->last_overflow_log_time = 0;
 	s->pending_drop_count = 0;
 	s->last_diag_time = 0;
+	s->underrun_count = 0;
+	s->sr_change_count = 0;
+	s->last_underrun_log_time = 0;
 	s->stream_start_time = (int64_t)os_gettime_ns();
 	s->sr_ratio = 1.0;
 	s->sr_slow_rate = 1.0;
@@ -565,6 +568,7 @@ static void smooth_media_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "sync_pts", false);
 	obs_data_set_default_bool(settings, "close_when_inactive", true);
 	obs_data_set_default_bool(settings, "disable_video", false);
+	obs_data_set_default_bool(settings, "debug_logging", false);
 }
 
 static obs_properties_t *smooth_media_get_properties(void *data)
@@ -652,6 +656,14 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 	obs_property_set_long_description(p,
 		"Extra FFmpeg demuxer/decoder options.\n"
 		"Example: analyzeduration=2000000 probesize=5000000");
+
+	p = obs_properties_add_bool(adv, "debug_logging",
+				    "Verbose Debug Logging");
+	obs_property_set_long_description(p,
+		"Log detailed timing to the OBS log every second, plus\n"
+		"events (underruns, dropped frames, sample-rate changes).\n"
+		"Use this when diagnosing clicks/stutter, then turn it\n"
+		"back off — it's noisy. Applies instantly.");
 
 	obs_properties_add_group(props, "grp_advanced",
 				 "Advanced", OBS_GROUP_NORMAL, adv);
@@ -749,6 +761,7 @@ static void smooth_media_update(void *data, obs_data_t *settings)
 	s->sync_pts = obs_data_get_bool(settings, "sync_pts");
 	s->close_when_inactive = obs_data_get_bool(settings, "close_when_inactive");
 	s->disable_video = obs_data_get_bool(settings, "disable_video");
+	s->debug_logging = obs_data_get_bool(settings, "debug_logging");
 	s->reconnect_delay_sec = (int)obs_data_get_int(settings, "reconnect_delay_sec");
 
 	if (s->reconnect_delay_sec < 1)
@@ -905,9 +918,24 @@ static void smooth_media_tick(void *data, float seconds)
 				/* Wanted audio but buffer empty → underrun;
 				 * grow the adaptive cushion so we rebuild a
 				 * deeper buffer after the stall. */
-				if (s->audio_frames_out > 0)
+				if (s->audio_frames_out > 0) {
 					audio_buffer_note_underrun(
 						&s->audio_buf);
+					s->underrun_count++;
+					if (s->debug_logging &&
+					    (wall_now - s->last_underrun_log_time)
+						    >= 500000000LL) {
+						SM_LOG(LOG_INFO,
+						       "DBG underrun #%llu (buf empty, tgt now %lldms)",
+						       (unsigned long long)
+							       s->underrun_count,
+						       (long long)(audio_buffer_target_ns(
+									&s->audio_buf) /
+								1000000));
+						s->last_underrun_log_time =
+							wall_now;
+					}
+				}
 				break;
 			}
 
@@ -957,8 +985,17 @@ static void smooth_media_tick(void *data, float seconds)
 					   SR_UPDATE_DEADBAND_HZ &&
 				   (wall_now - s->last_sr_change_ns) >=
 					   SR_MIN_HOLD_NS) {
+				uint32_t old_sr = s->declared_sr;
 				s->declared_sr = (uint32_t)(exact + 0.5);
 				s->last_sr_change_ns = wall_now;
+				s->sr_change_count++;
+				if (s->debug_logging)
+					SM_LOG(LOG_INFO,
+					       "DBG sample-rate change #%llu: %u -> %u Hz (slow_rate=%.5f) [resampler reset]",
+					       (unsigned long long)
+						       s->sr_change_count,
+					       old_sr, s->declared_sr,
+					       s->sr_slow_rate);
 			}
 			uint32_t adjusted_sample_rate = s->declared_sr;
 
@@ -1087,31 +1124,53 @@ static void smooth_media_tick(void *data, float seconds)
 			s->audio_frames_out++;
 			pops++;
 
-			/* ── Diagnostic logging every ~5 s ── */
-			if ((wall_now - s->last_diag_time) >=
-			    5000000000LL) {
+			/* ── Diagnostic logging ──
+			 * Normal: a compact line every 5 s.
+			 * Debug:  a detailed line every 1 s. */
+			int64_t diag_interval = s->debug_logging
+							? 1000000000LL
+							: 5000000000LL;
+			if ((wall_now - s->last_diag_time) >= diag_interval) {
 				int64_t av_wall = 0;
 				if (s->video_frames_out > 0)
 					av_wall = s->audio_out_ts -
 						  s->video_out_ts;
-				SM_LOG(LOG_INFO,
-				       "DIAG: rate=%.4f adj_sr=%u "
-				       "buf=%lldms tgt=%lldms av_wall=%lldms "
-				       "a_out=%llu v_out=%llu%s",
-				       rate, adjusted_sample_rate,
-				       (long long)(audio_buffer_level_ns(
-							&s->audio_buf) /
-						  1000000),
-				       (long long)(audio_buffer_target_ns(
-							&s->audio_buf) /
-						  1000000),
-				       (long long)(av_wall / 1000000),
-				       (unsigned long long)
-					       s->audio_frames_out,
-				       (unsigned long long)
-					       s->video_frames_out,
-				       s->sync_pts ? " [PTS-SYNC]"
-						   : "");
+				if (s->debug_logging) {
+					SM_LOG(LOG_INFO,
+					       "DBG rate=%.4f slow=%.4f sr_ratio=%.5f decl_sr=%u "
+					       "buf=%lldms tgt=%lldms jit=%lldms pop_iv=%lldms "
+					       "av=%lldms a=%llu v=%llu drop=%llu under=%llu sr_chg=%llu%s",
+					       rate, s->sr_slow_rate,
+					       s->sr_ratio, adjusted_sample_rate,
+					       (long long)(audio_buffer_level_ns(
+							&s->audio_buf) / 1000000),
+					       (long long)(audio_buffer_target_ns(
+							&s->audio_buf) / 1000000),
+					       (long long)(audio_buffer_jitter_ns(
+							&s->audio_buf) / 1000000),
+					       (long long)(pop_interval / 1000000),
+					       (long long)(av_wall / 1000000),
+					       (unsigned long long)s->audio_frames_out,
+					       (unsigned long long)s->video_frames_out,
+					       (unsigned long long)s->audio_buf.frames_dropped,
+					       (unsigned long long)s->underrun_count,
+					       (unsigned long long)s->sr_change_count,
+					       s->sync_pts ? " [PTS-SYNC]" : "");
+				} else {
+					SM_LOG(LOG_INFO,
+					       "DIAG: rate=%.4f adj_sr=%u "
+					       "buf=%lldms tgt=%lldms av_wall=%lldms "
+					       "a_out=%llu v_out=%llu%s",
+					       rate, adjusted_sample_rate,
+					       (long long)(audio_buffer_level_ns(
+							&s->audio_buf) / 1000000),
+					       (long long)(audio_buffer_target_ns(
+							&s->audio_buf) / 1000000),
+					       (long long)(av_wall / 1000000),
+					       (unsigned long long)s->audio_frames_out,
+					       (unsigned long long)s->video_frames_out,
+					       s->sync_pts ? " [PTS-SYNC]" : "");
+				}
 				s->last_diag_time = wall_now;
 			}
 		}
