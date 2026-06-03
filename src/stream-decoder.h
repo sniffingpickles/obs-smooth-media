@@ -68,6 +68,12 @@ struct stream_decoder_info {
 	int buffering_bytes;
 	bool hardware_decoding;
 
+	/* Optional external abort flag. The interrupt callback aborts blocking
+	 * I/O (including avformat_open_input) when *abort_flag becomes true.
+	 * Lets the caller cancel a connection that is still being opened —
+	 * before stream_decoder_create() has even returned a handle. */
+	volatile bool *abort_flag;
+
 	void *opaque;
 	stream_video_cb video_cb;
 	stream_audio_cb audio_cb;
@@ -112,6 +118,7 @@ struct stream_decoder {
 	/* Threading */
 	volatile bool running;
 	volatile bool kill;
+	volatile bool *abort_flag;  /* external cancel (e.g. source teardown) */
 };
 
 /* Create and open the stream. Returns NULL on failure. */

@@ -17,7 +17,14 @@ static bool sd_initialized = false;
 static int interrupt_callback(void *data)
 {
 	struct stream_decoder *sd = data;
-	return sd->kill ? 1 : 0;
+	if (sd->kill)
+		return 1;
+	/* Also honor the caller's external abort flag. This is what lets a
+	 * blocking avformat_open_input be cancelled during teardown even
+	 * though stream_decoder_create() hasn't returned a handle yet. */
+	if (sd->abort_flag && *sd->abort_flag)
+		return 1;
+	return 0;
 }
 
 /* get_format callback: tell the decoder to use our negotiated GPU surface
@@ -190,6 +197,7 @@ struct stream_decoder *stream_decoder_create(
 	sd->buffering = info->buffering_bytes;
 	sd->hw_decode = info->hardware_decoding;
 	sd->opaque = info->opaque;
+	sd->abort_flag = info->abort_flag;
 	sd->video_cb = info->video_cb;
 	sd->audio_cb = info->audio_cb;
 	sd->stop_cb = info->stop_cb;

@@ -1,6 +1,6 @@
 #pragma once
 
-#define SMOOTH_MEDIA_VERSION "1.4.8"
+#define SMOOTH_MEDIA_VERSION "1.4.9"
 
 #include <obs-module.h>
 #include <util/threading.h>

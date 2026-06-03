@@ -415,6 +415,11 @@ static void *media_thread_func(void *data)
 		.ffmpeg_options = s->ffmpeg_options,
 		.buffering_bytes = NETWORK_BUFFER_MB * 1024 * 1024,
 		.hardware_decoding = s->hw_decode,
+		/* Lets stop_media_thread() abort a still-in-progress
+		 * avformat_open_input() (e.g. connecting to a dead host) so
+		 * closing OBS while the source is connecting/reconnecting
+		 * can't hang on pthread_join. */
+		.abort_flag = &s->kill,
 		.opaque = s,
 		.video_cb = on_video_frame,
 		.audio_cb = on_audio_frame,
