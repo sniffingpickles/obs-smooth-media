@@ -399,6 +399,40 @@ static void on_stream_stopped(void *opaque)
 	(void)opaque;
 }
 
+/* FFmpeg's av_strerror can't translate Windows socket (WSA) error codes,
+ * so a failed network open just prints "Error number -10049 occurred".
+ * Map the common ones to readable, actionable text — IRL streaming hits
+ * these constantly. Returns NULL if not a recognized WSA code. */
+static const char *winsock_err_str(int averr)
+{
+	int e = averr < 0 ? -averr : averr;
+	switch (e) {
+	case 10049:
+		return "cannot assign requested address (WSAEADDRNOTAVAIL) — "
+		       "the server likely redirected playback to an internal/"
+		       "unreachable address, or the app/port is wrong";
+	case 10061:
+		return "connection refused (WSAECONNREFUSED) — nothing is "
+		       "listening on that host:port";
+	case 10060:
+		return "connection timed out (WSAETIMEDOUT) — host/port "
+		       "unreachable or firewalled";
+	case 10065:
+		return "no route to host (WSAEHOSTUNREACH)";
+	case 10051:
+		return "network unreachable (WSAENETUNREACH)";
+	case 10054:
+		return "connection reset by peer (WSAECONNRESET)";
+	case 10013:
+		return "permission denied (WSAEACCES)";
+	case 11001:
+		return "host not found (WSAHOST_NOT_FOUND) — DNS/hostname "
+		       "problem";
+	default:
+		return NULL;
+	}
+}
+
 /* ──────────────────────────────────────────────
  *  Media thread — runs the decoder loop
  * ────────────────────────────────────────────── */
@@ -431,11 +465,15 @@ static void *media_thread_func(void *data)
 	s->decoder = stream_decoder_create(&info);
 	if (!s->decoder) {
 		if (s->reconnect_attempts == 0) {
+			const char *reason = winsock_err_str(open_err);
 			char errbuf[160];
-			av_strerror(open_err, errbuf, sizeof(errbuf));
+			if (!reason) {
+				av_strerror(open_err, errbuf, sizeof(errbuf));
+				reason = errbuf;
+			}
 			SM_LOG(LOG_WARNING,
 			       "Failed to open stream: %s — %s", s->url,
-			       errbuf);
+			       reason);
 		}
 		s->active = false;
 
