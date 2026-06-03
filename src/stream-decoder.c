@@ -1,5 +1,7 @@
 #include "stream-decoder.h"
 
+#include <obs-module.h>
+#include <util/dstr.h>
 #include <libavdevice/avdevice.h>
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/hwcontext.h>
@@ -199,7 +201,13 @@ struct stream_decoder *stream_decoder_create(
 	}
 
 	AVDictionary *opts = NULL;
-	if (sd->buffering > 0) {
+	/* "buffer_size" is the UDP/RTP socket receive buffer in BYTES. Do NOT
+	 * set it for RIST: there the option means milliseconds (valid range
+	 * 0–30000), so a byte value like 2 MB is out of range and makes librist
+	 * reject the connection — i.e. RIST playback fails to open. It's
+	 * harmlessly ignored by SRT/RTMP, but skip it for RIST entirely. */
+	bool is_rist = sd->url && strncmp(sd->url, "rist", 4) == 0;
+	if (sd->buffering > 0 && !is_rist) {
 		av_dict_set_int(&opts, "buffer_size", sd->buffering, 0);
 	}
 
@@ -482,4 +490,33 @@ void stream_decoder_global_cleanup(void)
 		avformat_network_deinit();
 		sd_initialized = false;
 	}
+}
+
+void stream_decoder_log_protocols(void)
+{
+	struct dstr list = {0};
+	void *opaque = NULL;
+	const char *name;
+	bool have_rist = false, have_srt = false, have_rtmp = false;
+
+	while ((name = avio_enum_protocols(&opaque, 0)) != NULL) {
+		if (list.len)
+			dstr_cat(&list, ", ");
+		dstr_cat(&list, name);
+		if (strcmp(name, "rist") == 0)
+			have_rist = true;
+		else if (strcmp(name, "srt") == 0)
+			have_srt = true;
+		else if (strcmp(name, "rtmp") == 0)
+			have_rtmp = true;
+	}
+
+	blog(LOG_INFO, "[obs-smooth-media] FFmpeg input protocols: %s",
+	     list.array ? list.array : "(none)");
+	blog(LOG_INFO,
+	     "[obs-smooth-media] protocol support — RTMP:%s SRT:%s RIST:%s",
+	     have_rtmp ? "yes" : "NO", have_srt ? "yes" : "NO",
+	     have_rist ? "yes"
+		       : "NO (librist not built into this OBS's FFmpeg)");
+	dstr_free(&list);
 }

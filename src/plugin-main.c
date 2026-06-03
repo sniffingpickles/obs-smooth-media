@@ -16,6 +16,7 @@ bool obs_module_load(void)
 	obs_register_source(&smooth_media_source_info);
 	blog(LOG_INFO, "[obs-smooth-media] Plugin loaded (v%s)",
 	     SMOOTH_MEDIA_VERSION);
+	stream_decoder_log_protocols();
 	return true;
 }
 

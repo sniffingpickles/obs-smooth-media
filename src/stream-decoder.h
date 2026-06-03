@@ -133,3 +133,7 @@ bool stream_decoder_should_stop(const struct stream_decoder *sd);
 
 /* Release process-global FFmpeg network state. Call once on module unload. */
 void stream_decoder_global_cleanup(void);
+
+/* Log the FFmpeg input protocols available at runtime (rtmp/srt/rist/...).
+ * Useful to confirm whether the host OBS's FFmpeg includes librist. */
+void stream_decoder_log_protocols(void);
