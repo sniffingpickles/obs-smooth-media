@@ -14,6 +14,7 @@
 #include <libswscale/swscale.h>
 #include <libswresample/swresample.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/error.h>
 
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -73,6 +74,11 @@ struct stream_decoder_info {
 	 * Lets the caller cancel a connection that is still being opened —
 	 * before stream_decoder_create() has even returned a handle. */
 	volatile bool *abort_flag;
+
+	/* Optional: on failure, the AVERROR code is written here so the caller
+	 * can report exactly why the open failed (connection refused, server
+	 * error, no stream, timeout, ...). */
+	int *open_result;
 
 	void *opaque;
 	stream_video_cb video_cb;

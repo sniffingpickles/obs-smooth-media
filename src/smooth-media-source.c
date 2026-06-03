@@ -409,6 +409,7 @@ static void *media_thread_func(void *data)
 
 	os_set_thread_name("smooth_media_thread");
 
+	int open_err = 0;
 	struct stream_decoder_info info = {
 		.url = s->url,
 		.format_name = s->input_format,
@@ -420,6 +421,7 @@ static void *media_thread_func(void *data)
 		 * closing OBS while the source is connecting/reconnecting
 		 * can't hang on pthread_join. */
 		.abort_flag = &s->kill,
+		.open_result = &open_err,
 		.opaque = s,
 		.video_cb = on_video_frame,
 		.audio_cb = on_audio_frame,
@@ -428,8 +430,13 @@ static void *media_thread_func(void *data)
 
 	s->decoder = stream_decoder_create(&info);
 	if (!s->decoder) {
-		if (s->reconnect_attempts == 0)
-			SM_LOG(LOG_WARNING, "Failed to open stream: %s", s->url);
+		if (s->reconnect_attempts == 0) {
+			char errbuf[160];
+			av_strerror(open_err, errbuf, sizeof(errbuf));
+			SM_LOG(LOG_WARNING,
+			       "Failed to open stream: %s — %s", s->url,
+			       errbuf);
+		}
 		s->active = false;
 
 		pthread_mutex_lock(&s->state_mutex);

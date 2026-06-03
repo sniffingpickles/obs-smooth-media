@@ -251,11 +251,16 @@ struct stream_decoder *stream_decoder_create(
 	av_dict_free(&opts);
 
 	if (ret < 0) {
+		if (info->open_result)
+			*info->open_result = ret;
 		stream_decoder_destroy(sd);
 		return NULL;
 	}
 
-	if (avformat_find_stream_info(sd->fmt_ctx, NULL) < 0) {
+	ret = avformat_find_stream_info(sd->fmt_ctx, NULL);
+	if (ret < 0) {
+		if (info->open_result)
+			*info->open_result = ret;
 		stream_decoder_destroy(sd);
 		return NULL;
 	}
@@ -266,6 +271,8 @@ struct stream_decoder *stream_decoder_create(
 				     AVMEDIA_TYPE_AUDIO, false);
 
 	if (!sd->has_video && !sd->has_audio) {
+		if (info->open_result)
+			*info->open_result = AVERROR_STREAM_NOT_FOUND;
 		stream_decoder_destroy(sd);
 		return NULL;
 	}
