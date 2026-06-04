@@ -228,14 +228,18 @@ struct stream_decoder *stream_decoder_create(
 		sd->fmt_ctx->flags |= AVFMT_FLAG_NOBUFFER;
 	}
 
-	/* Set protocol-appropriate timeouts (microseconds) for network
-	 * streams. The TCP/RTMP socket timeout option was renamed from the
-	 * legacy "stimeout" to "timeout" in modern FFmpeg; set both plus
-	 * rw_timeout so we work across versions. Unknown keys are ignored. */
+	/* Set protocol-appropriate timeouts (microseconds) for network streams.
+	 *
+	 * IMPORTANT: do NOT set "timeout" for RTMP. FFmpeg's native RTMP
+	 * protocol treats "timeout" as the *listen* timeout and it IMPLIES
+	 * listen (server) mode — the connection then tries to bind() to the
+	 * remote address and fails with "can't assign requested address"
+	 * (WSAEADDRNOTAVAIL on Windows). For RTMP we use the AVIO-level
+	 * rw_timeout instead, which is the client read/write timeout and does
+	 * not change the connection mode. For SRT/RIST, "timeout" is the
+	 * (correct) connection timeout. */
 	if (sd->url) {
 		if (strncmp(sd->url, "rtmp", 4) == 0) {
-			av_dict_set(&opts, "timeout", "30000000", 0);
-			av_dict_set(&opts, "stimeout", "30000000", 0);
 			av_dict_set(&opts, "rw_timeout", "30000000", 0);
 		} else if (strncmp(sd->url, "srt", 3) == 0) {
 			av_dict_set(&opts, "timeout", "30000000", 0);
