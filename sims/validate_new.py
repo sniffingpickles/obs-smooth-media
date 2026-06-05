@@ -39,7 +39,7 @@ POP_CAP = 8
 SR_DEADBAND_HZ = 40.0
 SR_SLOW_ALPHA = 0.0015
 SR_MIN_HOLD = 2 * NS
-CLOCK_SETTLE = 2 * NS
+CLOCK_SETTLE = 8 * NS   # = warmup: don't measure rate until catch-up clears
 STALL_GAP = 500 * NS // 1000
 SR_STABLE_JITTER = 50 * NS // 1000
 

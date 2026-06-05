@@ -19,7 +19,14 @@
 #define SR_SLOW_ALPHA       0.0015         /* per-tick EMA on the drift estimate (~11s TC) — rejects jitter-induced rate wobble so the declared rate stays put */
 #define SR_UPDATE_DEADBAND_HZ 40.0         /* only re-declare sample rate after it drifts this far — keeps OBS's resampler from resetting (which clicks) */
 #define SR_MIN_HOLD_NS      (2000000000LL) /* and never re-declare more often than this */
-#define CLOCK_SETTLE_NS     (2000000000LL) /* ignore the first 2s of audio for rate measurement: SRT flushes its buffer in a burst at connect, which would otherwise poison the rate estimate */
+/* Ignore delivery-rate measurement for this long after a (re)connect or a
+ * stall. The server's catch-up flush (a moderate, multi-second burst that
+ * slips past the instantaneous-burst filter) would otherwise pollute the rate
+ * window — biasing the declared rate (clicks + pitch glide) and over-draining
+ * the buffer. Matches the warmup so we pace at 1.0x and don't measure until
+ * the catch-up has fully cleared. The buffer-level trim protects against
+ * underrun during this window. */
+#define CLOCK_SETTLE_NS     SR_WARMUP_NS
 #define STALL_GAP_NS        (500000000LL)  /* an audio arrival gap larger than this is treated as a stall; rate measurement re-settles afterward so the stall+catch-up burst can't corrupt it. Kept well above normal jitter (which can momentarily exceed 250ms) so it only trips on genuine freezes. */
 #define SR_STABLE_JITTER_NS (50000000LL)   /* only change the declared sample rate while jitter is below this (link calm) — prevents chasing the rate during a disruption */
 
