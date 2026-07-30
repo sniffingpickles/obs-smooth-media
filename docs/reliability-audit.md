@@ -175,6 +175,16 @@ at 2026-07-30 22:20:51 UTC and is expected to finish at
 2026-07-31 22:21:51 UTC. No pass is claimed until at least 86,300 seconds of
 the replacement evidence is analyzed.
 
+GitHub Actions passed on proposed commit `515bc47`: the Windows job built and
+uploaded the OBS 32.0.4 / FFmpeg 7.1 x64 plugin, and the Linux job passed the
+strict, ASan/UBSan, and TSan suites. The resulting CI DLL is an x86-64 Windows
+PE module with SHA-256
+`4f9b3d6f1dcff6b05cfe370917ce3ec6c238b18221ee669184ab46e9935e0566`.
+At 1 hour 22 minutes, a non-blocking snapshot of the replacement soak also
+passed analysis with zero reconnect samples, counter resets, or source stalls
+over 1.04 seconds. Process tail medians were flat: private bytes decreased
+30 KiB, handles were unchanged, and threads decreased by 0.5.
+
 ## Residual qualification
 
 “Crash-proof” cannot be proven for a native plugin embedded in OBS and using
@@ -182,7 +192,6 @@ FFmpeg, GPU drivers, protocol libraries, and third-party filters. The isolated
 controller/decoder evidence and the Windows OBS pass are strong, but a release
 still needs:
 
-- the pinned GitHub Windows workflow to run on the proposed commit;
 - NVDEC and QSV coverage on representative NVIDIA and newer Intel GPUs;
 - SRT hardware-decode and multi-hour hostile-network repetitions;
 - matched-content A/V capture during bandwidth recovery;
