@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "stream-decoder.h"
 
 #include <errno.h>
@@ -199,13 +201,23 @@ static double monotonic_seconds(void)
 	return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
 }
 
+static void sleep_milliseconds(long milliseconds)
+{
+	struct timespec remaining = {
+		.tv_sec = milliseconds / 1000,
+		.tv_nsec = (milliseconds % 1000) * 1000000L,
+	};
+	while (nanosleep(&remaining, &remaining) == -1 && errno == EINTR)
+		;
+}
+
 static void test_blocking_open_abort(void)
 {
 	struct abort_open open = {0};
 	pthread_t thread;
 	double start = monotonic_seconds();
 	CHECK(pthread_create(&thread, NULL, open_blocked_udp, &open) == 0);
-	usleep(150000);
+	sleep_milliseconds(150);
 	os_atomic_set_bool(&open.abort_flag, true);
 	pthread_join(thread, NULL);
 	double elapsed = monotonic_seconds() - start;

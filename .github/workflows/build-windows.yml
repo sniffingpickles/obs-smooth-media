@@ -183,7 +183,8 @@ jobs:
           $obsSrc = "${{ github.workspace }}/deps/obs-source"
           $ffmpegDir = "${{ github.workspace }}/deps/ffmpeg"
 
-          cmake -B build -G "Visual Studio 17 2022" -A x64 `
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_TESTING=OFF `
             -DOBS_DIR="$obsDir" `
             -DOBS_INCLUDE_DIR="$obsSrc/libobs" `
@@ -201,8 +202,15 @@ jobs:
           New-Item -ItemType Directory -Path artifact/obs-plugins/64bit -Force | Out-Null
           New-Item -ItemType Directory -Path artifact/data/obs-plugins/${{ env.PLUGIN_NAME }} -Force | Out-Null
 
-          # Copy plugin DLL
-          Copy-Item build/Release/${{ env.PLUGIN_NAME }}.dll artifact/obs-plugins/64bit/
+          # Locate the module independently of single- or multi-config
+          # generator output layout.
+          $pluginDll = Get-ChildItem build -Recurse `
+            -Filter "${{ env.PLUGIN_NAME }}.dll" |
+            Select-Object -First 1
+          if (-not $pluginDll) {
+            throw "${{ env.PLUGIN_NAME }}.dll was not produced"
+          }
+          Copy-Item $pluginDll.FullName artifact/obs-plugins/64bit/
 
           # Copy locale data
           if (Test-Path data) {
