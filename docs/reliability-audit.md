@@ -158,10 +158,22 @@ positives. An SSH session cannot enumerate the OBS window in the interactive
 desktop session, so the old helper sent no close signal. The replacement
 records both session IDs and uses a temporary interactive scheduled task.
 
-A strict 24-hour clean RTMP/RIST soak is in progress on the final isolated DLL.
-It checkpoints both sources once per second and process identity/resources
-once per minute. No pass is claimed until at least 86,300 seconds of evidence
-is analyzed.
+The first strict 24-hour attempt is retained as an invalidated harness run,
+not a plugin failure. At 4 hours 35 minutes, downloading both live JSONL files
+with Windows OpenSSH `scp` held exclusive read handles while the observers
+tried to reopen the files with `Add-Content`. Both observers stopped with an
+explicit sharing-violation exception. Their final samples were active and
+playing with no reconnect or counter reset. OBS remained on the same PID, and
+a later 13.15-hour process snapshot plus fresh WebSocket samples showed both
+sources still playing and advancing with no crash event or dump.
+
+The observer and process monitor now keep shared, auto-flushed writers open
+for the run, and a dedicated helper copies live evidence through
+`FileShare.ReadWrite` before download. A real concurrent-read smoke completed
+both RTMP and RIST observers successfully. A fresh strict 24-hour rerun began
+at 2026-07-30 22:20:51 UTC and is expected to finish at
+2026-07-31 22:21:51 UTC. No pass is claimed until at least 86,300 seconds of
+the replacement evidence is analyzed.
 
 ## Residual qualification
 
@@ -176,8 +188,9 @@ still needs:
 - matched-content A/V capture during bandwidth recovery;
 - rapid show/hide, scene-switch, source-update, and OBS-shutdown loops;
 - audio-only, video-only, stereo, 5.1, and 7.1 format coverage; and
-- completion of the active 24-hour Windows OBS soak while monitoring PID,
-  memory, handles, threads, liveness, A/V status, and shutdown latency.
+- completion of the active lock-safe 24-hour Windows OBS rerun while
+  monitoring PID, memory, handles, threads, liveness, A/V status, and
+  shutdown latency.
 
 Those tests cover host callbacks, drivers, and protocol implementations that
 cannot be reproduced by the standalone suite.

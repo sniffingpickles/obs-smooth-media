@@ -9,46 +9,64 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-Remove-Item $ResultPath -ErrorAction SilentlyContinue
+. (Join-Path $PSScriptRoot "shared-file-writer.ps1")
 
-$deadline = [DateTime]::UtcNow.AddSeconds($DurationSeconds)
-$samples = 0
-while ([DateTime]::UtcNow -lt $deadline) {
-    $process = Get-Process obs64 -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if (-not $process) {
-        [PSCustomObject]@{
+function Write-ProcessSample {
+    param([Parameter(Mandatory = $true)]$Sample)
+
+    $csv = @($Sample | ConvertTo-Csv -NoTypeInformation)
+    if (-not $script:CsvHeaderWritten) {
+        $script:ResultWriter.WriteLine($csv[0])
+        $script:CsvHeaderWritten = $true
+    }
+    $script:ResultWriter.WriteLine($csv[-1])
+}
+
+$script:ResultWriter = New-SharedUtf8Writer -Path $ResultPath
+$script:CsvHeaderWritten = $false
+try {
+    $deadline = [DateTime]::UtcNow.AddSeconds($DurationSeconds)
+    $samples = 0
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $process = Get-Process obs64 -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if (-not $process) {
+            Write-ProcessSample ([PSCustomObject]@{
+                Utc = [DateTime]::UtcNow.ToString("o")
+                Alive = $false
+                ProcessId = $null
+                WorkingSet = $null
+                Private = $null
+                Handles = $null
+                Threads = $null
+                CpuSeconds = $null
+            })
+            throw "obs64 exited during process monitoring"
+        }
+
+        Write-ProcessSample ([PSCustomObject]@{
             Utc = [DateTime]::UtcNow.ToString("o")
-            Alive = $false
-            ProcessId = $null
-            WorkingSet = $null
-            Private = $null
-            Handles = $null
-            Threads = $null
-            CpuSeconds = $null
-        } | Export-Csv -NoTypeInformation -Append -Path $ResultPath
-        throw "obs64 exited during process monitoring"
+            Alive = $true
+            ProcessId = $process.Id
+            WorkingSet = [long]$process.WorkingSet64
+            Private = [long]$process.PrivateMemorySize64
+            Handles = $process.HandleCount
+            Threads = $process.Threads.Count
+            CpuSeconds = [double]$process.CPU
+        })
+        $samples++
+        Start-Sleep -Seconds $SampleIntervalSeconds
     }
 
     [PSCustomObject]@{
-        Utc = [DateTime]::UtcNow.ToString("o")
-        Alive = $true
-        ProcessId = $process.Id
-        WorkingSet = [long]$process.WorkingSet64
-        Private = [long]$process.PrivateMemorySize64
-        Handles = $process.HandleCount
-        Threads = $process.Threads.Count
-        CpuSeconds = [double]$process.CPU
-    } | Export-Csv -NoTypeInformation -Append -Path $ResultPath
-    $samples++
-    Start-Sleep -Seconds $SampleIntervalSeconds
+        success = $true
+        resultPath = $ResultPath
+        durationSeconds = $DurationSeconds
+        sampleIntervalSeconds = $SampleIntervalSeconds
+        samples = $samples
+        utc = [DateTime]::UtcNow.ToString("o")
+    } | ConvertTo-Json
+} finally {
+    $script:ResultWriter.Dispose()
+    $script:ResultWriter = $null
 }
-
-[PSCustomObject]@{
-    success = $true
-    resultPath = $ResultPath
-    durationSeconds = $DurationSeconds
-    sampleIntervalSeconds = $SampleIntervalSeconds
-    samples = $samples
-    utc = [DateTime]::UtcNow.ToString("o")
-} | ConvertTo-Json

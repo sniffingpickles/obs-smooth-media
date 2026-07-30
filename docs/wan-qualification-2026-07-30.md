@@ -213,14 +213,35 @@ and removes the task. All shutdown times above use this corrected method.
 
 ## Persistent clean soak
 
-A dual RTMP/RIST clean soak began at 2026-07-30 08:55:37 UTC on the final DLL.
-Two strict one-second source observers and a one-minute process monitor run as
-interactive scheduled tasks, so SSH loss cannot terminate the evidence
-collection. The planned source duration is 86,400 seconds and the process
-monitor runs 86,460 seconds. The acceptance gate allows no reconnect sample,
+The first dual RTMP/RIST clean-soak attempt began at
+2026-07-30 08:55:37 UTC. It is retained as an invalidated harness run. At
+4 hours 35 minutes, a progress check copied the two active JSONL files
+directly with Windows OpenSSH `scp`. The reader held each file exclusively
+while the corresponding observer tried to reopen it with `Add-Content`, so
+both observer tasks stopped with a sharing-violation exception. All recorded
+source samples through that point were active and playing with no reconnect
+or counter reset. The OBS process and sources continued running: at
+13.15 hours the PID was unchanged, fresh status counters advanced, tail
+handles and threads had not grown, the 12-hour private-memory slope was
+0.82 MiB/hour, and there was no matching crash event or dump. Those facts are
+useful evidence, but the attempt is not counted as a 24-hour pass.
+
+The checkpoint and process writers now keep shared, auto-flushed handles open
+for the run. `snapshot-soak-results.ps1` copies live evidence through
+`FileShare.ReadWrite`; only those snapshots are downloaded. A live writer
+completed all 100 records during concurrent access, a mid-write snapshot
+captured 11 valid records without delaying the writer, and a real dual
+RTMP/RIST smoke completed both observers successfully with zero reconnects or
+counter resets.
+
+The replacement clean soak began at 2026-07-30 22:20:51 UTC on the same final
+DLL and existing OBS PID. Its three isolated scheduled tasks use a new task
+prefix and result directory. The planned source duration is 86,400 seconds,
+the process monitor runs 86,460 seconds, and expected completion is
+2026-07-31 22:21:51 UTC. The acceptance gate allows no reconnect sample,
 counter reset, stale final counter, process/PID loss, crash/hang event, dump,
 or excessive tail growth. This document does not claim that result before the
-run completes and its checkpoints are analyzed.
+replacement run completes and its snapshots are analyzed.
 
 ## Safety and evidence
 
@@ -233,18 +254,19 @@ run completes and its checkpoints are analyzed.
 - Completed-run JSON/JSONL, process CSV, OBS logs, Windows event evidence,
   qdisc events, FFmpeg logs, shutdown results, and checksums are retained
   beneath `artifacts/windows-qualification`.
-- The clean-soak scheduled tasks, isolated labs, local-only WebSocket
+- The invalidated clean-soak tasks were removed after their evidence was
+  preserved. The replacement tasks, isolated labs, local-only WebSocket
   automation, WER dump capture, and RIST firewall rule intentionally remain
-  active until the 24-hour evidence is collected. They are not represented as
-  cleaned up yet.
+  active until the replacement 24-hour evidence is collected. They are not
+  represented as cleaned up yet.
 
 ## Remaining network coverage
 
 This qualifies the software-decode SRT, RTMP, and RIST paths under synthetic
 hostile WAN conditions. It does not replace:
 
-- completion and analysis of the in-progress 24-hour clean dual-transport
-  soak;
+- completion and analysis of the in-progress lock-safe 24-hour clean
+  dual-transport rerun;
 - hardware-decode repetitions for each transport;
 - a matched flash/beep fixture captured from OBS to measure content A/V error;
 - multi-hour hostile-network soak testing; or

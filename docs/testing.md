@@ -119,6 +119,21 @@ connect/probe/read is blocked.
 When `-ResultPath` is set, the harness also writes a sibling `.jsonl`
 checkpoint after every observation. A crash, forced stop, or lost SSH session
 therefore preserves all completed samples instead of losing the entire run.
+The source checkpoint and process CSV remain open through a shared,
+auto-flushed writer for the entire run. Do not copy those live files directly
+with `scp`: some Windows OpenSSH versions request an exclusive read handle.
+Create a consistent, non-blocking snapshot first:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File tests/windows/snapshot-soak-results.ps1 `
+  -SourceDirectory artifacts/dual-soak `
+  -SnapshotDirectory artifacts/dual-soak-snapshot
+```
+
+Download files from the snapshot directory, never from the active result
+directory. A failed or incompatible reader can then affect only the snapshot
+operation, not the observers.
 The final JSON records a failure summary even when an assertion throws. Every
 successful run also requires audio and video counters to advance during a
 short final liveness window; an old nonzero counter in a silently stalled

@@ -63,7 +63,9 @@ if (-not (Get-Process obs64 -ErrorAction SilentlyContinue)) {
 
 $harness = Join-Path $PSScriptRoot "obs-e2e.ps1"
 $monitor = Join-Path $PSScriptRoot "monitor-obs-process.ps1"
-if (-not (Test-Path $harness) -or -not (Test-Path $monitor)) {
+$sharedWriter = Join-Path $PSScriptRoot "shared-file-writer.ps1"
+if (-not (Test-Path $harness) -or -not (Test-Path $monitor) -or
+    -not (Test-Path $sharedWriter)) {
     throw "Soak helper scripts are missing beside this file"
 }
 

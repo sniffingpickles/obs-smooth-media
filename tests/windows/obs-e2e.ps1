@@ -19,9 +19,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "shared-file-writer.ps1")
+
 $script:Socket = $null
 $script:Identified = $false
 $script:Observations = New-Object System.Collections.Generic.List[object]
+$script:CheckpointWriter = $null
 $script:CheckpointPath = if ($ResultPath) {
     if ([IO.Path]::GetExtension($ResultPath) -eq ".json") {
         [IO.Path]::ChangeExtension($ResultPath, ".jsonl")
@@ -35,7 +38,8 @@ if ($RequestTimeoutSeconds -lt 1) {
     throw "RequestTimeoutSeconds must be at least 1"
 }
 if ($script:CheckpointPath) {
-    Remove-Item $script:CheckpointPath -ErrorAction SilentlyContinue
+    $script:CheckpointWriter = New-SharedUtf8Writer `
+        -Path $script:CheckpointPath
 }
 
 function Send-WebSocketJson {
@@ -154,9 +158,10 @@ function Get-SmoothStatus {
         avOffsetMs = [long]$status.avOffsetMs
     }
     $script:Observations.Add($observation)
-    if ($script:CheckpointPath) {
-        $observation | ConvertTo-Json -Compress |
-            Add-Content -Encoding UTF8 -Path $script:CheckpointPath
+    if ($script:CheckpointWriter) {
+        $script:CheckpointWriter.WriteLine(
+            ($observation | ConvertTo-Json -Compress)
+        )
     }
     return $status
 }
@@ -454,6 +459,10 @@ try {
     }
     throw
 } finally {
+    if ($script:CheckpointWriter) {
+        $script:CheckpointWriter.Dispose()
+        $script:CheckpointWriter = $null
+    }
     if ($CleanupOnExit -and $script:Identified -and
         $script:Socket -and
         $script:Socket.State -eq
