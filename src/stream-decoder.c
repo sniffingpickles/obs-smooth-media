@@ -186,11 +186,18 @@ static bool init_decoder(struct stream_decode_ctx *ctx, AVFormatContext *fmt,
 		return false;
 	}
 
+#ifdef SMOOTH_MEDIA_TSAN_SERIAL_FFMPEG
+	/* Distribution FFmpeg libraries are not built with our TSan runtime.
+	 * Keep their internal slice workers out of this test-only build so TSan
+	 * remains focused on the plugin's own threads and synchronization. */
+	ctx->decoder->thread_count = 1;
+#else
 	if (ctx->decoder->thread_count == 1 &&
 	    id != AV_CODEC_ID_PNG && id != AV_CODEC_ID_TIFF &&
 	    id != AV_CODEC_ID_JPEG2000 && id != AV_CODEC_ID_MPEG4 &&
 	    id != AV_CODEC_ID_WEBP)
 		ctx->decoder->thread_count = 0;
+#endif
 
 	/* Hardware decoding is video-only and best-effort: if no GPU device
 	 * can be attached, try_enable_hw_decode() leaves us in software mode. */

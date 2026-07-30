@@ -61,7 +61,11 @@ ctest --test-dir build-tsan --output-on-failure
 ```
 
 ASan/UBSan and TSan are separate builds because those runtimes cannot be
-combined.
+combined. The TSan decoder-test binary serializes FFmpeg's internal decoder
+workers because distribution FFmpeg libraries are not instrumented with the
+test binary's TSan runtime. Plugin-owned buffer, clock, abort, and wrapper
+threads remain instrumented; this is not a global TSan suppression and does
+not change the production plugin build.
 
 ## Windows release qualification
 

@@ -116,6 +116,9 @@ if(NOT WIN32)
         endif()
 
         if(ENABLE_THREAD_SANITIZER)
+            target_compile_definitions(decoder-tests PRIVATE
+                SMOOTH_MEDIA_TSAN_SERIAL_FFMPEG=1
+            )
             target_compile_options(decoder-tests PRIVATE
                 -fsanitize=thread -fno-omit-frame-pointer
             )
