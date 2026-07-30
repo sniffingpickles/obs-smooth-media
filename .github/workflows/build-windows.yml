@@ -184,6 +184,7 @@ jobs:
           $ffmpegDir = "${{ github.workspace }}/deps/ffmpeg"
 
           cmake -B build -G "Visual Studio 17 2022" -A x64 `
+            -DBUILD_TESTING=OFF `
             -DOBS_DIR="$obsDir" `
             -DOBS_INCLUDE_DIR="$obsSrc/libobs" `
             -DOBS_LIB="$obsDir/lib/obs.lib" `

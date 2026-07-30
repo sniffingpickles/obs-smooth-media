@@ -2,6 +2,9 @@
 Independent cross-check of two suspected failure modes in obs-smooth-media,
 to validate the parallel agents' findings. Pure-math port of the plugin logic.
 
+HISTORICAL MODEL: this script intentionally preserves earlier constants and
+logic. Use tests/test-timing-model.py for validation of the current design.
+
   (1) clock_tracker effective measurement window vs the intended 5s
   (2) jitter-buffer drain under a sustained ~0.98x "slightly slow" stream
       (the exact case the plugin exists to fix) with the real tick pop pacing

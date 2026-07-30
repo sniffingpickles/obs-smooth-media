@@ -2,6 +2,10 @@
 """
 sim_recovery_video.py
 
+HISTORICAL MODEL: this script models an earlier implementation. It is retained
+to reproduce the failure modes that led to the current recovery design, not to
+validate current source. Use tests/test-timing-model.py for acceptance testing.
+
 Faithful pure-math simulation of the `obs-smooth-media` OBS plugin, focused on:
   (1) the VIDEO timestamp path and A/V sync over long sessions, and
   (2) reconnect / stall / scene-switch recovery dynamics.

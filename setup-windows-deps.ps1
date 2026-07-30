@@ -16,7 +16,7 @@ $OBS_VERSION = "32.0.4"
 $FFMPEG_VERSION = "7.1"
 
 # OBS Portable download
-$OBS_URL = "https://github.com/obsproject/obs-studio/releases/download/$OBS_VERSION/OBS-Studio-$OBS_VERSION-Windows.zip"
+$OBS_URL = "https://github.com/obsproject/obs-studio/releases/download/$OBS_VERSION/OBS-Studio-$OBS_VERSION-Windows-x64.zip"
 $OBS_ZIP = Join-Path $DEPS_DIR "obs-studio.zip"
 $OBS_DIR = Join-Path $DEPS_DIR "obs-studio"
 
@@ -76,9 +76,9 @@ if (-not (Test-Path $FFMPEG_DIR)) {
 $OBS_SRC = Join-Path $DEPS_DIR "obs-source"
 if (-not (Test-Path $OBS_SRC)) {
     Write-Host "Cloning OBS Studio source (headers only)..." -ForegroundColor Cyan
-    git clone --depth 1 --filter=blob:none --sparse "https://github.com/obsproject/obs-studio.git" $OBS_SRC
+    git clone --depth 1 --branch $OBS_VERSION --filter=blob:none --sparse "https://github.com/obsproject/obs-studio.git" $OBS_SRC
     Push-Location $OBS_SRC
-    git sparse-checkout set libobs
+    git sparse-checkout set libobs deps/w32-pthreads
     Pop-Location
     Write-Host "OBS source headers at: $OBS_SRC" -ForegroundColor Green
 } else {

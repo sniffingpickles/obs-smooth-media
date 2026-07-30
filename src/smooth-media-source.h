@@ -11,7 +11,7 @@
 #include "clock-tracker.h"
 
 /*
- * Smooth Media Source — OBS source plugin for stutter-free RTMP/SRT playback.
+ * Smooth Media Source — OBS source plugin for smooth RTMP/SRT/RIST playback.
  *
  * This source does its own FFmpeg demuxing and uses clock drift tracking
  * plus an audio jitter buffer to eliminate the audio stutter that occurs
@@ -32,31 +32,30 @@ struct smooth_media_source {
 	volatile bool debug_logging; /* verbose per-second diagnostics + event logging */
 	int reconnect_delay_sec;
 
-	/* Decoder */
-	struct stream_decoder *decoder;
-
 	/* Audio buffering and clock tracking */
 	struct audio_buffer audio_buf;
 	struct clock_tracker clock;
 
 	/* Playback state */
+	pthread_mutex_t lifecycle_mutex;
 	pthread_t media_thread;
 	bool media_thread_valid;
 	volatile bool active;
 	volatile bool kill;
+	volatile bool notify_started;
+	volatile bool notify_ended;
 
-	/* Reconnection */
-	pthread_t reconnect_thread;
-	pthread_mutex_t reconnect_mutex;
-	bool reconnect_thread_valid;
-	os_event_t *reconnect_stop_event;
-	volatile bool reconnecting;
+	/* Reconnection is scheduled by video_tick; opening still happens on the
+	 * media thread. This avoids a second worker thread mutating source
+	 * lifecycle state and resetting buffers concurrently with OBS. */
+	bool reconnecting;
+	int64_t reconnect_at_ns;
 	uint32_t reconnect_attempts;   /* suppress repeated failure logs */
 
 	/* Timestamp tracking for output */
 	int64_t audio_out_ts;      /* last audio output timestamp */
 	int64_t video_out_ts;      /* last video output timestamp */
-	bool first_audio;
+	volatile bool first_audio;
 	bool first_video;
 	bool got_first_keyframe;
 	int64_t first_audio_pts;
@@ -72,6 +71,7 @@ struct smooth_media_source {
 	uint64_t pending_drop_count;   /* drops since last overflow log */
 	int64_t last_diag_time;        /* wall clock of last diagnostic log */
 	uint64_t underrun_count;       /* total drain underruns (debug) */
+	bool audio_starved;            /* coalesce one stall into one underrun event */
 	uint64_t sr_change_count;      /* total declared-sample-rate changes (debug) */
 	int64_t last_underrun_log_time; /* rate-limit for debug underrun logs */
 	int64_t stream_start_time;     /* wall clock when stream opened */
@@ -82,6 +82,7 @@ struct smooth_media_source {
 	int64_t overfill_since_ns;     /* wall time the buffer first went well above target (0 = at/near target) */
 	bool did_initial_trim;         /* one-shot: trim the connect burst backlog to target */
 	double sr_ratio;               /* slew-limited declared-sample-rate ratio (1.0 = no correction) */
+	double playback_ratio;         /* declared_sr / input_sr, shared with video pacing */
 	double sr_slow_rate;           /* heavily-smoothed drift estimate that drives the declared rate */
 	uint32_t declared_sr;          /* last sample rate handed to OBS (held stable via deadband) */
 	int64_t last_sr_change_ns;     /* wall time the declared rate last changed (min-hold) */
@@ -91,7 +92,23 @@ struct smooth_media_source {
 	/* State */
 	enum obs_media_state state;
 	pthread_mutex_t state_mutex;
+	pthread_mutex_t timing_mutex;
+	pthread_mutex_t controller_mutex;
 };
+
+struct smooth_media_status {
+	enum obs_media_state state;
+	bool active;
+	bool reconnecting;
+	char *url;
+	uint64_t audio_frames_out;
+	uint64_t video_frames_out;
+	int64_t av_offset_ms;
+};
+
+bool smooth_media_get_status_snapshot(struct smooth_media_source *s,
+				      struct smooth_media_status *status);
+void smooth_media_status_free(struct smooth_media_status *status);
 
 /* OBS source info registration */
 extern struct obs_source_info smooth_media_source_info;

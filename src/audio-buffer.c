@@ -1,4 +1,5 @@
 #include "audio-buffer.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,6 +14,10 @@
 #define UNDERRUN_CREDIT_STEP_NS (60000000LL)  /* +60ms cushion per underrun */
 #define UNDERRUN_CREDIT_CAP_NS  (400000000LL) /* credit caps at +400ms */
 #define UNDERRUN_CREDIT_DECAY_NS (500000LL)   /* decay ~0.5ms/frame (~23ms/s) */
+/* Retain ordinary codec-frame allocations for reuse, but release unusually
+ * large slots. Otherwise a hostile sequence can rotate a multi-megabyte frame
+ * through every ring slot and leave gigabytes resident after it is dropped. */
+#define RETAINED_FRAME_CAPACITY_MAX (64U * 1024U)
 
 static void free_frame_data(struct audio_buf_frame *f)
 {
@@ -22,31 +27,72 @@ static void free_frame_data(struct audio_buf_frame *f)
 			f->data[i] = NULL;
 		}
 		f->data_size[i] = 0;
+		f->data_capacity[i] = 0;
 	}
 	f->valid = false;
 }
 
-void audio_buffer_init(struct audio_buffer *ab)
+static void clear_frame_metadata(struct audio_buf_frame *f)
 {
+	for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++)
+		f->data_size[i] = 0;
+	f->frames = 0;
+	f->sample_rate = 0;
+	f->channels = 0;
+	f->pts_ns = 0;
+	f->format = 0;
+	f->speakers = 0;
+	f->valid = false;
+}
+
+static bool frame_storage_is_large(const struct audio_buf_frame *f)
+{
+	size_t total = 0;
+	for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++) {
+		if (f->data_capacity[i] >
+		    RETAINED_FRAME_CAPACITY_MAX - total)
+			return true;
+		total += f->data_capacity[i];
+	}
+	return false;
+}
+
+static void clear_frame_for_reuse(struct audio_buf_frame *f)
+{
+	if (frame_storage_is_large(f))
+		free_frame_data(f);
+	clear_frame_metadata(f);
+}
+
+bool audio_buffer_init(struct audio_buffer *ab)
+{
+	if (!ab)
+		return false;
 	memset(ab, 0, sizeof(*ab));
-	pthread_mutex_init(&ab->mutex, NULL);
+	if (pthread_mutex_init(&ab->mutex, NULL) != 0)
+		return false;
 	ab->min_buffer_ns = DEFAULT_MIN_BUFFER_NS;
 	ab->max_buffer_ns = DEFAULT_MAX_BUFFER_NS;
 	ab->target_buffer_ns = DEFAULT_MIN_BUFFER_NS;
 	ab->last_output_pts = -1;
+	return true;
 }
 
 /* Recompute the adaptive target from measured jitter + underrun credit, and
  * derive the drop ceiling from it. Caller must hold the mutex. */
 static void recalc_target(struct audio_buffer *ab)
 {
-	int64_t target = ab->min_buffer_ns +
-			 TARGET_JITTER_COEF * ab->jitter_ns +
-			 ab->underrun_credit_ns;
-	if (target < ab->min_buffer_ns)
-		target = ab->min_buffer_ns;
-	if (target > TARGET_CAP_NS)
+	int64_t target = ab->min_buffer_ns;
+	if (ab->jitter_ns >
+	    (TARGET_CAP_NS - target) / TARGET_JITTER_COEF) {
 		target = TARGET_CAP_NS;
+	} else {
+		target += TARGET_JITTER_COEF * ab->jitter_ns;
+	}
+	if (ab->underrun_credit_ns > TARGET_CAP_NS - target)
+		target = TARGET_CAP_NS;
+	else
+		target += ab->underrun_credit_ns;
 	ab->target_buffer_ns = target;
 
 	int64_t cap = target + MAX_MARGIN_NS;
@@ -57,22 +103,62 @@ static void recalc_target(struct audio_buffer *ab)
 
 void audio_buffer_free(struct audio_buffer *ab)
 {
-	pthread_mutex_destroy(&ab->mutex);
+	if (!ab)
+		return;
+
+	pthread_mutex_lock(&ab->mutex);
 	for (int i = 0; i < AUDIO_BUF_MAX_FRAMES; i++)
 		free_frame_data(&ab->frames[i]);
 	free_frame_data(&ab->out_frame);
+	pthread_mutex_unlock(&ab->mutex);
+	pthread_mutex_destroy(&ab->mutex);
 	memset(ab, 0, sizeof(*ab));
 }
 
 void audio_buffer_reset(struct audio_buffer *ab)
 {
-	int64_t min_ns = ab->min_buffer_ns;
-	audio_buffer_free(ab);
-	audio_buffer_init(ab);
-	/* Preserve the configured floor; clear all adaptive state so a fresh
-	 * connection re-learns the link's jitter from scratch. */
-	ab->min_buffer_ns = min_ns;
-	ab->target_buffer_ns = min_ns;
+	if (!ab)
+		return;
+
+	pthread_mutex_lock(&ab->mutex);
+
+	for (int i = 0; i < AUDIO_BUF_MAX_FRAMES; i++)
+		free_frame_data(&ab->frames[i]);
+	free_frame_data(&ab->out_frame);
+
+	ab->read_pos = 0;
+	ab->write_pos = 0;
+	ab->count = 0;
+	ab->max_buffer_ns = DEFAULT_MAX_BUFFER_NS;
+	ab->target_buffer_ns = ab->min_buffer_ns;
+	ab->jitter_ns = 0;
+	ab->underrun_credit_ns = 0;
+	ab->prev_arrival_ns = 0;
+	ab->prev_arrival_pts_ns = 0;
+	ab->have_arrival_ref = false;
+	ab->primed = false;
+	ab->total_buffered_ns = 0;
+	ab->last_output_pts = -1;
+	ab->frames_in = 0;
+	ab->frames_out = 0;
+	ab->frames_dropped = 0;
+
+	pthread_mutex_unlock(&ab->mutex);
+}
+
+void audio_buffer_set_minimum(struct audio_buffer *ab, int64_t minimum_ns)
+{
+	if (!ab)
+		return;
+	if (minimum_ns < 0)
+		minimum_ns = 0;
+	if (minimum_ns > TARGET_CAP_NS)
+		minimum_ns = TARGET_CAP_NS;
+
+	pthread_mutex_lock(&ab->mutex);
+	ab->min_buffer_ns = minimum_ns;
+	recalc_target(ab);
+	pthread_mutex_unlock(&ab->mutex);
 }
 
 static int64_t frame_duration_ns(uint32_t samples, uint32_t sample_rate)
@@ -82,16 +168,45 @@ static int64_t frame_duration_ns(uint32_t samples, uint32_t sample_rate)
 	return (int64_t)samples * 1000000000LL / (int64_t)sample_rate;
 }
 
-static void recalc_buffered(struct audio_buffer *ab)
+static void drop_oldest(struct audio_buffer *ab)
 {
-	int64_t total = 0;
-	for (int i = 0; i < ab->count; i++) {
-		int idx = (ab->read_pos + i) % AUDIO_BUF_MAX_FRAMES;
-		struct audio_buf_frame *f = &ab->frames[idx];
-		if (f->valid)
-			total += frame_duration_ns(f->frames, f->sample_rate);
+	if (ab->count <= 0)
+		return;
+
+	struct audio_buf_frame *f = &ab->frames[ab->read_pos];
+	ab->total_buffered_ns -=
+		frame_duration_ns(f->frames, f->sample_rate);
+	if (ab->total_buffered_ns < 0)
+		ab->total_buffered_ns = 0;
+	clear_frame_for_reuse(f);
+	ab->read_pos = (ab->read_pos + 1) % AUDIO_BUF_MAX_FRAMES;
+	ab->count--;
+	ab->frames_dropped++;
+}
+
+static bool valid_push(const uint8_t *const *data, const size_t *data_sizes,
+		       uint32_t frames, uint32_t sample_rate,
+		       uint32_t channels)
+{
+	if (!data || !data_sizes || frames == 0 || sample_rate == 0 ||
+	    channels == 0 || channels > AUDIO_BUF_MAX_PLANES)
+		return false;
+
+	int64_t duration = frame_duration_ns(frames, sample_rate);
+	if (duration <= 0 || duration > MAX_HARD_CAP_NS)
+		return false;
+
+	size_t total = 0;
+	bool have_data = false;
+	for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++) {
+		if ((data[i] == NULL) != (data_sizes[i] == 0))
+			return false;
+		if (data_sizes[i] > AUDIO_BUF_MAX_FRAME_BYTES - total)
+			return false;
+		total += data_sizes[i];
+		have_data = have_data || data_sizes[i] != 0;
 	}
-	ab->total_buffered_ns = total;
+	return have_data;
 }
 
 bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
@@ -100,16 +215,29 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 		       int format, int speakers, int64_t pts_ns,
 		       int64_t arrival_wall_ns)
 {
+	if (!ab || !valid_push(data, data_sizes, frames, sample_rate, channels))
+		return false;
+
 	pthread_mutex_lock(&ab->mutex);
 
 	/* ── Adaptive jitter estimation (RFC 3550 interarrival jitter) ──
 	 * D = (arrival_n - arrival_{n-1}) - (pts_n - pts_{n-1}): how much the
 	 * delivery gap deviated from the media gap. J += (|D| - J)/16. */
-	if (ab->have_arrival_ref) {
-		int64_t d = (arrival_wall_ns - ab->prev_arrival_ns) -
-			    (pts_ns - ab->prev_arrival_pts_ns);
-		if (d < 0)
-			d = -d;
+	if (ab->have_arrival_ref &&
+	    arrival_wall_ns >= ab->prev_arrival_ns &&
+	    pts_ns >= ab->prev_arrival_pts_ns) {
+		uint64_t arrival_delta =
+			(uint64_t)arrival_wall_ns -
+			(uint64_t)ab->prev_arrival_ns;
+		uint64_t pts_delta =
+			(uint64_t)pts_ns -
+			(uint64_t)ab->prev_arrival_pts_ns;
+		uint64_t diff = arrival_delta > pts_delta
+					? arrival_delta - pts_delta
+					: pts_delta - arrival_delta;
+		int64_t d = diff > (uint64_t)INT64_MAX
+				    ? INT64_MAX
+				    : (int64_t)diff;
 		ab->jitter_ns += (d - ab->jitter_ns) / 16;
 		if (ab->jitter_ns < 0)
 			ab->jitter_ns = 0;
@@ -127,48 +255,44 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 
 	recalc_target(ab);
 
-	/* If buffer is full, drop oldest frame */
-	if (ab->count >= AUDIO_BUF_MAX_FRAMES) {
-		free_frame_data(&ab->frames[ab->read_pos]);
-		ab->read_pos = (ab->read_pos + 1) % AUDIO_BUF_MAX_FRAMES;
-		ab->count--;
-		ab->frames_dropped++;
-	}
-
-	/* Also enforce max buffer duration — drop oldest if too much latency */
-	while (ab->count > 0 && ab->total_buffered_ns > ab->max_buffer_ns) {
-		free_frame_data(&ab->frames[ab->read_pos]);
-		ab->read_pos = (ab->read_pos + 1) % AUDIO_BUF_MAX_FRAMES;
-		ab->count--;
-		ab->frames_dropped++;
-		recalc_buffered(ab);
-	}
-
 	struct audio_buf_frame *f = &ab->frames[ab->write_pos];
+	bool release_on_full_drop =
+		ab->count >= AUDIO_BUF_MAX_FRAMES &&
+		frame_storage_is_large(f);
 
-	/* Copy audio data */
-	int num_planes = 0;
+	/* Allocate every required growth before modifying the queue or the slot.
+	 * A failed allocation therefore leaves both the old frame and all ring
+	 * indices intact. */
+	uint8_t *grown[AUDIO_BUF_MAX_PLANES] = {0};
 	for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++) {
-		if (data[i] && data_sizes[i] > 0) {
-			/* Realloc if needed */
-			if (f->data_size[i] < data_sizes[i]) {
-				free(f->data[i]);
-				f->data[i] = malloc(data_sizes[i]);
-				if (!f->data[i]) {
-					f->data_size[i] = 0;
-					pthread_mutex_unlock(&ab->mutex);
-					return false;
-				}
+		if (data_sizes[i] > 0 &&
+		    (release_on_full_drop ||
+		     data_sizes[i] > f->data_capacity[i])) {
+			grown[i] = malloc(data_sizes[i]);
+			if (!grown[i]) {
+				for (int j = 0; j < AUDIO_BUF_MAX_PLANES; j++)
+					free(grown[j]);
+				pthread_mutex_unlock(&ab->mutex);
+				return false;
 			}
+		}
+	}
+
+	/* If the ring is full, write_pos is the oldest slot. Drop it only after
+	 * all allocations above have succeeded. */
+	if (ab->count >= AUDIO_BUF_MAX_FRAMES)
+		drop_oldest(ab);
+
+	for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++) {
+		if (grown[i]) {
+			free(f->data[i]);
+			f->data[i] = grown[i];
+			f->data_capacity[i] = data_sizes[i];
+		}
+		if (data_sizes[i] > 0) {
 			memcpy(f->data[i], data[i], data_sizes[i]);
 			f->data_size[i] = data_sizes[i];
-			num_planes++;
 		} else {
-			/* Clear unused planes */
-			if (f->data[i]) {
-				free(f->data[i]);
-				f->data[i] = NULL;
-			}
 			f->data_size[i] = 0;
 		}
 	}
@@ -188,6 +312,13 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 	/* Update buffered duration */
 	ab->total_buffered_ns += frame_duration_ns(frames, sample_rate);
 
+	/* Enforce the latency ceiling after adding the new frame. Keep at least
+	 * the newest frame so a legal but unusually large decoder frame cannot
+	 * turn the buffer into a permanent empty/underrun loop. */
+	while (ab->count > 1 &&
+	       ab->total_buffered_ns > ab->max_buffer_ns)
+		drop_oldest(ab);
+
 	/* Check if primed — against the adaptive target, not a fixed floor */
 	if (!ab->primed && ab->total_buffered_ns >= ab->target_buffer_ns)
 		ab->primed = true;
@@ -198,6 +329,8 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 
 void audio_buffer_note_underrun(struct audio_buffer *ab)
 {
+	if (!ab)
+		return;
 	pthread_mutex_lock(&ab->mutex);
 	ab->underrun_credit_ns += UNDERRUN_CREDIT_STEP_NS;
 	if (ab->underrun_credit_ns > UNDERRUN_CREDIT_CAP_NS)
@@ -208,16 +341,19 @@ void audio_buffer_note_underrun(struct audio_buffer *ab)
 
 void audio_buffer_trim_to_target(struct audio_buffer *ab)
 {
+	if (!ab)
+		return;
 	pthread_mutex_lock(&ab->mutex);
-	while (ab->count > 0 &&
-	       ab->total_buffered_ns > ab->target_buffer_ns) {
-		struct audio_buf_frame *f = &ab->frames[ab->read_pos];
-		ab->total_buffered_ns -=
-			frame_duration_ns(f->frames, f->sample_rate);
-		free_frame_data(f);
-		ab->read_pos = (ab->read_pos + 1) % AUDIO_BUF_MAX_FRAMES;
-		ab->count--;
-		ab->frames_dropped++;
+	while (ab->count > 1) {
+		struct audio_buf_frame *oldest =
+			&ab->frames[ab->read_pos];
+		int64_t after_drop =
+			ab->total_buffered_ns -
+			frame_duration_ns(oldest->frames,
+					  oldest->sample_rate);
+		if (after_drop < ab->target_buffer_ns)
+			break;
+		drop_oldest(ab);
 	}
 	if (ab->total_buffered_ns < 0)
 		ab->total_buffered_ns = 0;
@@ -226,7 +362,11 @@ void audio_buffer_trim_to_target(struct audio_buffer *ab)
 
 bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out)
 {
+	if (!out)
+		return false;
 	*out = NULL;
+	if (!ab)
+		return false;
 
 	pthread_mutex_lock(&ab->mutex);
 
@@ -247,41 +387,19 @@ bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out)
 		return false;
 	}
 
-	/* Copy the popped frame into the staging buffer while we hold the
-	 * lock. The ring slot can be reused by a concurrent push the moment
-	 * we unlock, so the consumer must operate on its own copy. */
+	/* Swap the popped slot with the staging frame. This transfers ownership
+	 * without allocation or copying and keeps the returned storage isolated
+	 * from concurrent pushes until the next pop/reset. */
 	struct audio_buf_frame *o = &ab->out_frame;
-	for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++) {
-		if (f->data[i] && f->data_size[i] > 0) {
-			if (o->data_size[i] < f->data_size[i]) {
-				free(o->data[i]);
-				o->data[i] = malloc(f->data_size[i]);
-				if (!o->data[i]) {
-					o->data_size[i] = 0;
-					pthread_mutex_unlock(&ab->mutex);
-					return false;
-				}
-			}
-			memcpy(o->data[i], f->data[i], f->data_size[i]);
-			o->data_size[i] = f->data_size[i];
-		} else {
-			if (o->data[i]) {
-				free(o->data[i]);
-				o->data[i] = NULL;
-			}
-			o->data_size[i] = 0;
-		}
-	}
-	o->frames = f->frames;
-	o->sample_rate = f->sample_rate;
-	o->channels = f->channels;
-	o->pts_ns = f->pts_ns;
-	o->format = f->format;
-	o->speakers = f->speakers;
-	o->valid = true;
+	struct audio_buf_frame tmp = *o;
+	*o = *f;
+	*f = tmp;
+	clear_frame_for_reuse(f);
 
-	ab->last_output_pts = f->pts_ns;
-	ab->total_buffered_ns -= frame_duration_ns(f->frames, f->sample_rate);
+	/* The popped frame now lives in out_frame; f is the cleared staging
+	 * storage. Account against o or the reported level never decreases. */
+	ab->last_output_pts = o->pts_ns;
+	ab->total_buffered_ns -= frame_duration_ns(o->frames, o->sample_rate);
 	if (ab->total_buffered_ns < 0)
 		ab->total_buffered_ns = 0;
 
@@ -298,31 +416,63 @@ bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out)
 	return true;
 }
 
-int64_t audio_buffer_level_ns(const struct audio_buffer *ab)
+void audio_buffer_get_stats(struct audio_buffer *ab,
+			    struct audio_buffer_stats *stats)
 {
-	return ab->total_buffered_ns;
+	if (!stats)
+		return;
+	memset(stats, 0, sizeof(*stats));
+	if (!ab)
+		return;
+
+	pthread_mutex_lock(&ab->mutex);
+	stats->count = ab->count;
+	stats->primed = ab->primed;
+	stats->level_ns = ab->total_buffered_ns;
+	stats->target_ns = ab->target_buffer_ns;
+	stats->max_ns = ab->max_buffer_ns;
+	stats->jitter_ns = ab->jitter_ns;
+	stats->frames_in = ab->frames_in;
+	stats->frames_out = ab->frames_out;
+	stats->frames_dropped = ab->frames_dropped;
+	pthread_mutex_unlock(&ab->mutex);
 }
 
-int64_t audio_buffer_target_ns(const struct audio_buffer *ab)
+int64_t audio_buffer_level_ns(struct audio_buffer *ab)
 {
-	return ab->target_buffer_ns;
+	struct audio_buffer_stats stats;
+	audio_buffer_get_stats(ab, &stats);
+	return stats.level_ns;
 }
 
-int64_t audio_buffer_jitter_ns(const struct audio_buffer *ab)
+int64_t audio_buffer_target_ns(struct audio_buffer *ab)
 {
-	return ab->jitter_ns;
+	struct audio_buffer_stats stats;
+	audio_buffer_get_stats(ab, &stats);
+	return stats.target_ns;
 }
 
-bool audio_buffer_is_ready(const struct audio_buffer *ab)
+int64_t audio_buffer_jitter_ns(struct audio_buffer *ab)
 {
-	return ab->primed;
+	struct audio_buffer_stats stats;
+	audio_buffer_get_stats(ab, &stats);
+	return stats.jitter_ns;
 }
 
-double audio_buffer_fill_ratio(const struct audio_buffer *ab)
+bool audio_buffer_is_ready(struct audio_buffer *ab)
 {
-	if (ab->max_buffer_ns <= 0)
+	struct audio_buffer_stats stats;
+	audio_buffer_get_stats(ab, &stats);
+	return stats.primed;
+}
+
+double audio_buffer_fill_ratio(struct audio_buffer *ab)
+{
+	struct audio_buffer_stats stats;
+	audio_buffer_get_stats(ab, &stats);
+	if (stats.max_ns <= 0)
 		return 0.0;
-	double ratio = (double)ab->total_buffered_ns / (double)ab->max_buffer_ns;
+	double ratio = (double)stats.level_ns / (double)stats.max_ns;
 	if (ratio > 1.0)
 		ratio = 1.0;
 	return ratio;

@@ -1,7 +1,9 @@
 build/
 build_*/
+build-*/
 deps/
 compiles/
+artifacts/
 
 *.o
 *.obj

@@ -58,7 +58,7 @@ static void on_set_stream_url(obs_data_t *request_data, obs_data_t *response_dat
 		return;
 	}
 
-	if (!url) {
+	if (!url || !*url) {
 		obs_data_set_bool(response_data, "success", false);
 		obs_data_set_string(response_data, "error", "Missing 'url' parameter");
 		return;
@@ -78,8 +78,10 @@ static void on_set_stream_url(obs_data_t *request_data, obs_data_t *response_dat
 	obs_data_release(settings);
 	obs_source_release(source);
 
-	blog(LOG_INFO, "[obs-smooth-media] WebSocket: SetStreamURL '%s' -> %s",
-	     source_name, url);
+	/* Stream URLs commonly embed publish/playback credentials. Never copy
+	 * them into the long-lived OBS log. */
+	blog(LOG_INFO, "[obs-smooth-media] WebSocket: SetStreamURL '%s' updated",
+	     source_name);
 
 	obs_data_set_bool(response_data, "success", true);
 	obs_data_set_string(response_data, "url", url);
@@ -150,8 +152,17 @@ static void on_get_status(obs_data_t *request_data, obs_data_t *response_data, v
 		return;
 	}
 
-	const char *state_str = "unknown";
-	switch (s->state) {
+	struct smooth_media_status status;
+	if (!smooth_media_get_status_snapshot(s, &status)) {
+		obs_data_set_bool(response_data, "success", false);
+		obs_data_set_string(response_data, "error",
+				    "Unable to snapshot source status");
+		obs_source_release(source);
+		return;
+	}
+
+	const char *state_str;
+	switch (status.state) {
 	case OBS_MEDIA_STATE_NONE:    state_str = "none"; break;
 	case OBS_MEDIA_STATE_PLAYING: state_str = "playing"; break;
 	case OBS_MEDIA_STATE_OPENING: state_str = "opening"; break;
@@ -160,22 +171,24 @@ static void on_get_status(obs_data_t *request_data, obs_data_t *response_data, v
 	case OBS_MEDIA_STATE_STOPPED: state_str = "stopped"; break;
 	case OBS_MEDIA_STATE_ENDED:   state_str = "ended"; break;
 	case OBS_MEDIA_STATE_ERROR:   state_str = "error"; break;
+	default: state_str = "unknown"; break;
 	}
 
 	obs_data_set_bool(response_data, "success", true);
 	obs_data_set_string(response_data, "state", state_str);
-	obs_data_set_bool(response_data, "active", s->active);
-	obs_data_set_bool(response_data, "reconnecting", s->reconnecting);
-	obs_data_set_string(response_data, "url", s->url ? s->url : "");
-	obs_data_set_int(response_data, "audioFramesOut", (long long)s->audio_frames_out);
-	obs_data_set_int(response_data, "videoFramesOut", (long long)s->video_frames_out);
+	obs_data_set_bool(response_data, "active", status.active);
+	obs_data_set_bool(response_data, "reconnecting",
+			  status.reconnecting);
+	obs_data_set_string(response_data, "url",
+			    status.url ? status.url : "");
+	obs_data_set_int(response_data, "audioFramesOut",
+			 (long long)status.audio_frames_out);
+	obs_data_set_int(response_data, "videoFramesOut",
+			 (long long)status.video_frames_out);
+	obs_data_set_int(response_data, "avOffsetMs",
+			 (long long)status.av_offset_ms);
 
-	/* A/V wall offset in ms */
-	int64_t av_wall = 0;
-	if (s->audio_out_ts && s->video_out_ts)
-		av_wall = (s->audio_out_ts - s->video_out_ts) / 1000000;
-	obs_data_set_int(response_data, "avOffsetMs", (long long)av_wall);
-
+	smooth_media_status_free(&status);
 	obs_source_release(source);
 }
 
@@ -203,12 +216,10 @@ static void on_restart_source(obs_data_t *request_data, obs_data_t *response_dat
 		return;
 	}
 
-	/* Re-apply current settings to trigger update → start_media.
-	 * This is the equivalent of set_settings({}) on ffmpeg_source —
-	 * it forces a full stop + reconnect cycle. */
-	obs_data_t *settings = obs_source_get_settings(source);
-	obs_source_update(source, settings);
-	obs_data_release(settings);
+	/* Queue the source's actual media_restart callback. Re-applying
+	 * unchanged settings does not restart this source and made the old
+	 * vendor request report success without doing anything. */
+	obs_source_media_restart(source);
 	obs_source_release(source);
 
 	blog(LOG_INFO, "[obs-smooth-media] WebSocket: RestartSource '%s'",

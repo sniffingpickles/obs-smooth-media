@@ -132,7 +132,9 @@ Get the current playback status and diagnostics for a source.
 
 ### RestartSource
 
-Force a full stop + reconnect cycle on a source. This is the equivalent of calling `SetInputSettings` with empty JSON on a standard media source — it re-applies the current settings, which tears down the decoder thread and starts a fresh connection.
+Queue the source's native media-restart action. The action performs a full
+stop and starts a fresh connection when the source should be running. It does
+not rely on re-applying unchanged settings.
 
 Use this as a "fix" when a source is stuck, has drifted, or needs a clean reset.
 

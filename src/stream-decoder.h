@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <util/threading.h>
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -69,6 +70,13 @@ struct stream_decoder_info {
 	int buffering_bytes;
 	bool hardware_decoding;
 
+	/* Hard fallback deadline for open/probe, in milliseconds. Zero selects
+	 * the production default. Protocol-specific timeout options are not
+	 * consistently honored by every FFmpeg transport (notably a RIST
+	 * listener after a destroyed peer), so the interrupt callback enforces
+	 * this deadline around open and stream probing. */
+	int open_timeout_ms;
+
 	/* Optional external abort flag. The interrupt callback aborts blocking
 	 * I/O (including avformat_open_input) when *abort_flag becomes true.
 	 * Lets the caller cancel a connection that is still being opened —
@@ -100,10 +108,12 @@ struct stream_decode_ctx {
 	bool audio;
 	bool hw;              /* true once hardware decoding is active */
 	uint16_t max_luminance;
+	int64_t last_error_log_us;
 };
 
 struct stream_decoder {
 	AVFormatContext *fmt_ctx;
+	AVPacket *packet;
 
 	struct stream_decode_ctx video;
 	struct stream_decode_ctx audio;
@@ -125,6 +135,7 @@ struct stream_decoder {
 	volatile bool running;
 	volatile bool kill;
 	volatile bool *abort_flag;  /* external cancel (e.g. source teardown) */
+	int64_t interrupt_deadline_us; /* media-thread open/probe deadline */
 };
 
 /* Create and open the stream. Returns NULL on failure. */

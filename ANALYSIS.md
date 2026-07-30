@@ -1,5 +1,13 @@
 # OBS Media Source Audio Stutter — Root Cause Analysis
 
+> This file records the original root-cause investigation. The current
+> implementation, thread ownership, lifecycle state machine, invariants, and
+> acceptance gates are documented in
+> [docs/architecture.md](docs/architecture.md) and
+> [docs/testing.md](docs/testing.md). The completed hardening findings and
+> remaining Windows/driver qualification are in
+> [docs/reliability-audit.md](docs/reliability-audit.md).
+
 ## Issue Summary
 GitHub Issue [#12724](https://github.com/obsproject/obs-studio/issues/12724): When using OBS Media Source with SRT/RTMP streams that arrive **slightly slower than realtime**, audio becomes choppy, stuttery, and won't recover without restarting the source.
 

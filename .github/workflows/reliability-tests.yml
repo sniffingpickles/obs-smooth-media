@@ -1,0 +1,66 @@
+name: Reliability Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-and-model-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            cmake \
+            ffmpeg \
+            libavcodec-dev \
+            libavdevice-dev \
+            libavformat-dev \
+            libavutil-dev \
+            ninja-build \
+            pkg-config
+
+      - name: Build and run strict tests
+        run: |
+          cmake -S . -B build-test -G Ninja \
+            -DBUILD_PLUGIN=OFF \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang
+          cmake --build build-test
+          ctest --test-dir build-test --output-on-failure
+
+      - name: Address and undefined behavior sanitizers
+        run: |
+          cmake -S . -B build-asan -G Ninja \
+            -DBUILD_PLUGIN=OFF \
+            -DBUILD_TESTING=ON \
+            -DENABLE_SANITIZERS=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang
+          cmake --build build-asan
+          ctest --test-dir build-asan --output-on-failure
+
+      - name: Thread sanitizer
+        run: |
+          cmake -S . -B build-tsan -G Ninja \
+            -DBUILD_PLUGIN=OFF \
+            -DBUILD_TESTING=ON \
+            -DENABLE_THREAD_SANITIZER=ON \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang
+          cmake --build build-tsan
+          ctest --test-dir build-tsan --output-on-failure
