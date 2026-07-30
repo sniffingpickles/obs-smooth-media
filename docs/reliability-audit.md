@@ -170,36 +170,53 @@ sources still playing and advancing with no crash event or dump.
 The observer and process monitor now keep shared, auto-flushed writers open
 for the run, and a dedicated helper copies live evidence through
 `FileShare.ReadWrite` before download. A real concurrent-read smoke completed
-both RTMP and RIST observers successfully. A fresh strict 24-hour rerun began
-at 2026-07-30 22:20:51 UTC and is expected to finish at
-2026-07-31 22:21:51 UTC. No pass is claimed until at least 86,300 seconds of
-the replacement evidence is analyzed.
+both RTMP and RIST observers successfully. A replacement run began at
+2026-07-30 22:20:51 UTC. Its final lock-safe snapshot covered 5,650 seconds
+(94 minutes 10 seconds) and passed analysis for both sources: zero reconnect
+samples, zero counter resets, continuous final-window audio/video output, and
+no source or sample stall over 1.04 seconds. Both sources remained active and
+`playing`, with final reported A/V offsets of -315 ms (RTMP) and -265 ms
+(RIST).
 
-GitHub Actions passed on proposed commit `515bc47`: the Windows job built and
+The process monitor retained one OBS PID for all 95 samples. Handle tail
+medians were unchanged at 1,997, thread tail medians decreased from 36 to 35,
+and private-byte tail medians grew 1.29 MiB with a fitted slope of
+approximately 0.21 MiB/hour. Immediately after the snapshot, OBS still had
+the same PID and Windows had no matching application-error, hang, WER, or
+crash-file record.
+
+The replacement cannot be represented as a completed 24-hour pass. After the
+94-minute snapshot was safely created, a validation-side cleanup command
+deleted the live audit artifact directory while the observers still held
+shareable file handles. The preserved snapshot remained intact, but the
+continuation of the record was no longer retrievable. The command did not
+touch the isolated OBS tree, plugin DLL, scenes, or running OBS process. The
+three invalidated observer tasks were stopped and removed, and the recovered
+snapshot remains on the qualification host under
+`C:\obs-smooth-audit-20260730\artifacts`.
+
+GitHub Actions passed on branch head `3d505e5`: the Windows job built and
 uploaded the OBS 32.0.4 / FFmpeg 7.1 x64 plugin, and the Linux job passed the
-strict, ASan/UBSan, and TSan suites. The resulting CI DLL is an x86-64 Windows
-PE module with SHA-256
+strict, ASan/UBSan, and TSan suites. The retrieved DLL from the code-identical
+`515bc47` build is an x86-64 Windows PE module with SHA-256
 `4f9b3d6f1dcff6b05cfe370917ce3ec6c238b18221ee669184ab46e9935e0566`.
-At 1 hour 22 minutes, a non-blocking snapshot of the replacement soak also
-passed analysis with zero reconnect samples, counter resets, or source stalls
-over 1.04 seconds. Process tail medians were flat: private bytes decreased
-30 KiB, handles were unchanged, and threads decreased by 0.5.
 
 ## Residual qualification
 
 “Crash-proof” cannot be proven for a native plugin embedded in OBS and using
 FFmpeg, GPU drivers, protocol libraries, and third-party filters. The isolated
-controller/decoder evidence and the Windows OBS pass are strong, but a release
-still needs:
+controller/decoder evidence, hostile-WAN matrices, Windows OBS pass, sanitizer
+suites, and 94-minute simultaneous RTMP/RIST run are sufficient to accept this
+revision as a release candidate. The following remain useful non-blocking
+qualification:
 
 - NVDEC and QSV coverage on representative NVIDIA and newer Intel GPUs;
 - SRT hardware-decode and multi-hour hostile-network repetitions;
 - matched-content A/V capture during bandwidth recovery;
 - rapid show/hide, scene-switch, source-update, and OBS-shutdown loops;
 - audio-only, video-only, stereo, 5.1, and 7.1 format coverage; and
-- completion of the active lock-safe 24-hour Windows OBS rerun while
-  monitoring PID, memory, handles, threads, liveness, A/V status, and
-  shutdown latency.
+- an independently supervised 24-hour Windows OBS run while monitoring PID,
+  memory, handles, threads, liveness, A/V status, and shutdown latency.
 
 Those tests cover host callbacks, drivers, and protocol implementations that
 cannot be reproduced by the standalone suite.
