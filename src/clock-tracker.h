@@ -19,7 +19,12 @@
  * frames/sec a 5 s window needs ~235 samples; the old value of 64 capped
  * the window at ~1.35 s regardless of window_ns, making the rate estimate
  * noisy and biased toward the clamp under catch-up bursts. */
-#define CLOCK_HISTORY_SIZE 320
+/*
+ * Keep at least five seconds even for small 2.5 ms audio frames. The old
+ * 320-sample ring silently shortened the configured window to 0.8 seconds
+ * for such streams and made the rate estimate chase jitter.
+ */
+#define CLOCK_HISTORY_SIZE 2048
 
 struct clock_sample {
 	int64_t stream_pts_ns;  /* PTS from the stream (nanoseconds) */
@@ -44,8 +49,8 @@ struct clock_tracker {
 	double smoothed_rate;     /* EMA-filtered stream_rate */
 
 	/* Configuration */
-	int64_t window_ns;        /* measurement window size (default: 2 seconds) */
-	double ema_alpha;         /* EMA smoothing factor (default: 0.05) */
+	int64_t window_ns;        /* measurement window size (default: 5 seconds) */
+	double ema_alpha;         /* EMA smoothing factor (default: 0.008) */
 
 	/* Guards cross-thread access: clock_tracker_record() runs on the
 	 * media thread while the smoothed rate is read on the OBS tick
@@ -53,7 +58,8 @@ struct clock_tracker {
 	pthread_mutex_t mutex;
 };
 
-void clock_tracker_init(struct clock_tracker *ct);
+/* Returns false if the internal mutex could not be created. */
+bool clock_tracker_init(struct clock_tracker *ct);
 void clock_tracker_free(struct clock_tracker *ct);
 void clock_tracker_reset(struct clock_tracker *ct);
 

@@ -2,6 +2,10 @@
 """
 Faithful numerical simulation of the obs-smooth-media AUDIO output path.
 
+HISTORICAL MODEL: this script models an earlier implementation. It is retained
+to reproduce the failure modes that led to the current controller, not to
+validate current source. Use tests/test-timing-model.py for acceptance testing.
+
 This is a pure-math port (no OBS / FFmpeg) of:
   - src/clock-tracker.c   (rate estimation)
   - src/audio-buffer.c    (jitter buffer)

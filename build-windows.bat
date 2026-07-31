@@ -43,7 +43,8 @@ cd build_win
 
 cmake .. -G "Visual Studio 17 2022" -A x64 ^
     -DOBS_DIR="%OBS_DIR%" ^
-    -DFFMPEG_DIR="%FFMPEG_DIR%"
+    -DFFMPEG_DIR="%FFMPEG_DIR%" ^
+    -DBUILD_TESTING=OFF
 
 if %ERRORLEVEL% neq 0 (
     echo.

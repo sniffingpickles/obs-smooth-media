@@ -36,14 +36,14 @@ This is a [known OBS issue](https://github.com/obsproject/obs-studio/issues/1272
 |---------|---------|-------------|
 | **Stream URL** | — | Any RTMP, SRT, or RIST stream URL |
 | **Input Format** | *(auto)* | Force a specific container format (e.g. `mpegts`), usually not needed |
-| **Reconnect Delay** | 10 s | How long to wait before retrying after a disconnect |
+| **Reconnect Delay** | 5 s | How long to wait before retrying after a disconnect |
 | **Hardware Decoding** | Off | GPU-accelerated video decoding (D3D11VA / NVDEC / QSV / VAAPI). Automatically falls back to software if the GPU path is unavailable. |
 | **Sync A/V via PTS** | Off | Lock audio tightly to the video timeline using presentation timestamps. |
 | **Close When Inactive** | On | Disconnect when the source is hidden or on another scene to save CPU, bandwidth, and server resources. |
 | **Disable Video Preview** | Off | Audio-only mode: keep the stream connected and audio playing, but stop sending video to OBS. Handy when working over a slow remote-desktop session. Applies instantly without reconnecting. |
 | **FFmpeg Options** | — | Advanced: additional FFmpeg demuxer/decoder options |
 
-The plugin automatically handles network buffering, audio jitter absorption, and clock drift correction — no manual tuning required. Playback-only toggles (sync, audio-only, close-when-inactive, reconnect delay) apply live and never interrupt the stream.
+The plugin automatically handles network buffering, audio jitter absorption, and clock drift correction — no manual tuning required. Playback-only toggles apply live; enabling close-when-inactive while the source is hidden closes the connection as requested.
 
 ## How It Works
 
@@ -270,7 +270,37 @@ src/
 ├── websocket-api.c        # obs-websocket vendor API integration
 ├── websocket-api.h
 └── obs-websocket-api.h    # obs-websocket vendor API header (upstream)
+
+tests/
+├── test-core.c             # Jitter-buffer/clock unit and concurrency stress tests
+├── test-decoder.c          # FFmpeg decode, corrupt recovery, and open cancellation
+├── test-timing-model.py    # Slow/fast/jitter A/V timing acceptance model
+├── test-analyze-soak.py    # Soak-evidence analyzer regression tests
+├── analyze-soak.py         # Long-run liveness/resource acceptance gate
+├── network/                # Isolated SRT/RTMP/RIST netem labs
+└── windows/                # OBS WebSocket, shutdown, and persistent-soak harnesses
+
+docs/
+├── architecture.md         # Pipeline, thread ownership, state machine, invariants
+├── reliability-audit.md    # Findings, resolutions, evidence, residual risks
+└── testing.md              # Local, sanitizer, CI, and bad-network test procedures
 ```
+
+### Reliability Tests
+
+The core controller and decoder can be tested without installing OBS:
+
+```bash
+cmake -S . -B build-test -G Ninja \
+  -DBUILD_PLUGIN=OFF -DBUILD_TESTING=ON
+cmake --build build-test
+ctest --test-dir build-test --output-on-failure
+```
+
+Address/undefined-behavior and thread-sanitizer builds are documented in
+[docs/testing.md](docs/testing.md). CI runs the strict native tests, real
+FFmpeg decode/corruption/cancellation integration tests, timing and soak
+acceptance models, ASan, UBSan, and TSan on every pull request.
 
 </details>
 

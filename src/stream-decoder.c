@@ -6,10 +6,37 @@
 #include <libavutil/mastering_display_metadata.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/time.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
 static bool sd_initialized = false;
+static pthread_mutex_t sd_init_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#define DEFAULT_OPEN_TIMEOUT_US INT64_C(35000000)
+
+static char *sd_strdup(const char *value)
+{
+	if (!value)
+		return NULL;
+
+	size_t size = strlen(value) + 1;
+	char *copy = malloc(size);
+	if (copy)
+		memcpy(copy, value, size);
+	return copy;
+}
+
+static int64_t saturating_add_i64(int64_t a, int64_t b)
+{
+	if (b > 0 && a > INT64_MAX - b)
+		return INT64_MAX;
+	if (b < 0 && a < INT64_MIN - b)
+		return INT64_MIN;
+	return a + b;
+}
 
 /* Aborts blocking FFmpeg I/O (av_read_frame, avformat_open_input) when the
  * source is being torn down. Called repeatedly by FFmpeg while it waits on
@@ -17,12 +44,15 @@ static bool sd_initialized = false;
 static int interrupt_callback(void *data)
 {
 	struct stream_decoder *sd = data;
-	if (sd->kill)
+	if (os_atomic_load_bool(&sd->kill))
 		return 1;
 	/* Also honor the caller's external abort flag. This is what lets a
 	 * blocking avformat_open_input be cancelled during teardown even
 	 * though stream_decoder_create() hasn't returned a handle yet. */
-	if (sd->abort_flag && *sd->abort_flag)
+	if (sd->abort_flag && os_atomic_load_bool(sd->abort_flag))
+		return 1;
+	if (sd->interrupt_deadline_us > 0 &&
+	    av_gettime_relative() >= sd->interrupt_deadline_us)
 		return 1;
 	return 0;
 }
@@ -34,6 +64,8 @@ static enum AVPixelFormat sd_get_hw_format(AVCodecContext *avctx,
 					   const enum AVPixelFormat *fmts)
 {
 	struct stream_decode_ctx *ctx = avctx->opaque;
+	if (!ctx || !fmts)
+		return AV_PIX_FMT_NONE;
 
 	for (const enum AVPixelFormat *p = fmts; *p != AV_PIX_FMT_NONE; p++) {
 		if (*p == ctx->hw_pix_fmt)
@@ -69,6 +101,10 @@ static void try_enable_hw_decode(struct stream_decode_ctx *ctx)
 		ctx->hw_ctx = hw_ctx;
 		ctx->hw_pix_fmt = cfg->pix_fmt;
 		ctx->decoder->hw_device_ctx = av_buffer_ref(hw_ctx);
+		if (!ctx->decoder->hw_device_ctx) {
+			av_buffer_unref(&ctx->hw_ctx);
+			continue;
+		}
 		ctx->decoder->opaque = ctx;
 		ctx->decoder->get_format = sd_get_hw_format;
 		ctx->sw_frame = av_frame_alloc();
@@ -86,20 +122,35 @@ static void try_enable_hw_decode(struct stream_decode_ctx *ctx)
 
 static uint16_t get_max_luminance(const AVStream *stream)
 {
+	if (!stream || !stream->codecpar)
+		return 0;
+
 	uint32_t max_luminance = 0;
 	for (int i = 0; i < stream->codecpar->nb_coded_side_data; i++) {
 		const AVPacketSideData *sd = &stream->codecpar->coded_side_data[i];
-		if (sd->type == AV_PKT_DATA_MASTERING_DISPLAY_METADATA) {
+		if (!sd->data)
+			continue;
+		if (sd->type == AV_PKT_DATA_MASTERING_DISPLAY_METADATA &&
+		    sd->size >= sizeof(AVMasteringDisplayMetadata)) {
 			const AVMasteringDisplayMetadata *m =
 				(AVMasteringDisplayMetadata *)sd->data;
-			if (m->has_luminance)
-				max_luminance = (uint32_t)(av_q2d(m->max_luminance) + 0.5);
-		} else if (sd->type == AV_PKT_DATA_CONTENT_LIGHT_LEVEL) {
+			if (m->has_luminance) {
+				double value = av_q2d(m->max_luminance);
+				if (value > 0.0 && value < 65536.0)
+					max_luminance =
+						(uint32_t)(value + 0.5);
+				else if (value >= 65536.0)
+					max_luminance = UINT16_MAX;
+			}
+		} else if (sd->type == AV_PKT_DATA_CONTENT_LIGHT_LEVEL &&
+			   sd->size >= sizeof(AVContentLightMetadata)) {
 			const AVContentLightMetadata *m =
 				(AVContentLightMetadata *)sd->data;
 			max_luminance = m->MaxCLL;
 		}
 	}
+	if (max_luminance > UINT16_MAX)
+		max_luminance = UINT16_MAX;
 	return (uint16_t)max_luminance;
 }
 
@@ -135,21 +186,45 @@ static bool init_decoder(struct stream_decode_ctx *ctx, AVFormatContext *fmt,
 		return false;
 	}
 
+#ifdef SMOOTH_MEDIA_TSAN_SERIAL_FFMPEG
+	/* Distribution FFmpeg libraries are not built with our TSan runtime.
+	 * Keep their internal slice workers out of this test-only build so TSan
+	 * remains focused on the plugin's own threads and synchronization. */
+	ctx->decoder->thread_count = 1;
+#else
 	if (ctx->decoder->thread_count == 1 &&
 	    id != AV_CODEC_ID_PNG && id != AV_CODEC_ID_TIFF &&
 	    id != AV_CODEC_ID_JPEG2000 && id != AV_CODEC_ID_MPEG4 &&
 	    id != AV_CODEC_ID_WEBP)
 		ctx->decoder->thread_count = 0;
+#endif
 
 	/* Hardware decoding is video-only and best-effort: if no GPU device
 	 * can be attached, try_enable_hw_decode() leaves us in software mode. */
-	if (type == AVMEDIA_TYPE_VIDEO && hw)
+	if (type == AVMEDIA_TYPE_VIDEO && hw) {
 		try_enable_hw_decode(ctx);
+		if (!ctx->hw)
+			blog(LOG_WARNING,
+			     "[obs-smooth-media] Hardware video decoding unavailable; using software");
+	}
 
 	ret = avcodec_open2(ctx->decoder, ctx->codec, NULL);
 	if (ret < 0) {
+		bool retry_software = ctx->hw;
+		if (retry_software)
+			blog(LOG_WARNING,
+			     "[obs-smooth-media] Hardware decoder open failed; retrying in software");
 		free_decoder(ctx);
+		if (retry_software)
+			return init_decoder(ctx, fmt, type, false);
 		return false;
+	}
+	if (ctx->hw) {
+		const char *pixel_format =
+			av_get_pix_fmt_name(ctx->hw_pix_fmt);
+		blog(LOG_INFO,
+		     "[obs-smooth-media] Hardware video decoding enabled (pixel format: %s)",
+		     pixel_format ? pixel_format : "unknown");
 	}
 
 	ctx->frame = av_frame_alloc();
@@ -181,19 +256,45 @@ static void free_decoder(struct stream_decode_ctx *ctx)
 struct stream_decoder *stream_decoder_create(
 	const struct stream_decoder_info *info)
 {
-	if (!sd_initialized) {
-		avdevice_register_all();
-		avformat_network_init();
-		sd_initialized = true;
+	if (!info || !info->url || !*info->url) {
+		if (info && info->open_result)
+			*info->open_result = AVERROR(EINVAL);
+		return NULL;
 	}
 
-	struct stream_decoder *sd = calloc(1, sizeof(*sd));
-	if (!sd)
-		return NULL;
+	if (info->open_result)
+		*info->open_result = 0;
 
-	sd->url = info->url ? strdup(info->url) : NULL;
-	sd->format_name = info->format_name ? strdup(info->format_name) : NULL;
-	sd->ffmpeg_options = info->ffmpeg_options ? strdup(info->ffmpeg_options) : NULL;
+	pthread_mutex_lock(&sd_init_mutex);
+	if (!sd_initialized) {
+		avdevice_register_all();
+		if (avformat_network_init() < 0) {
+			pthread_mutex_unlock(&sd_init_mutex);
+			if (info->open_result)
+				*info->open_result = AVERROR(EIO);
+			return NULL;
+		}
+		sd_initialized = true;
+	}
+	pthread_mutex_unlock(&sd_init_mutex);
+
+	struct stream_decoder *sd = calloc(1, sizeof(*sd));
+	if (!sd) {
+		if (info->open_result)
+			*info->open_result = AVERROR(ENOMEM);
+		return NULL;
+	}
+
+	sd->url = sd_strdup(info->url);
+	sd->format_name = sd_strdup(info->format_name);
+	sd->ffmpeg_options = sd_strdup(info->ffmpeg_options);
+	if (!sd->url || (info->format_name && !sd->format_name) ||
+	    (info->ffmpeg_options && !sd->ffmpeg_options)) {
+		if (info->open_result)
+			*info->open_result = AVERROR(ENOMEM);
+		stream_decoder_destroy(sd);
+		return NULL;
+	}
 	sd->buffering = info->buffering_bytes;
 	sd->hw_decode = info->hardware_decoding;
 	sd->opaque = info->opaque;
@@ -206,6 +307,13 @@ struct stream_decoder *stream_decoder_create(
 	const AVInputFormat *format = NULL;
 	if (sd->format_name && *sd->format_name) {
 		format = av_find_input_format(sd->format_name);
+		if (!format) {
+			if (info->open_result)
+				*info->open_result =
+					AVERROR_DEMUXER_NOT_FOUND;
+			stream_decoder_destroy(sd);
+			return NULL;
+		}
 	}
 
 	AVDictionary *opts = NULL;
@@ -220,10 +328,25 @@ struct stream_decoder *stream_decoder_create(
 	}
 
 	if (sd->ffmpeg_options && *sd->ffmpeg_options) {
-		av_dict_parse_string(&opts, sd->ffmpeg_options, "=", " ", 0);
+		int parse_ret = av_dict_parse_string(
+			&opts, sd->ffmpeg_options, "=", " ", 0);
+		if (parse_ret < 0) {
+			if (info->open_result)
+				*info->open_result = parse_ret;
+			av_dict_free(&opts);
+			stream_decoder_destroy(sd);
+			return NULL;
+		}
 	}
 
 	sd->fmt_ctx = avformat_alloc_context();
+	if (!sd->fmt_ctx) {
+		if (info->open_result)
+			*info->open_result = AVERROR(ENOMEM);
+		av_dict_free(&opts);
+		stream_decoder_destroy(sd);
+		return NULL;
+	}
 	if (sd->buffering == 0) {
 		sd->fmt_ctx->flags |= AVFMT_FLAG_NOBUFFER;
 	}
@@ -250,6 +373,18 @@ struct stream_decoder *stream_decoder_create(
 	sd->fmt_ctx->interrupt_callback.callback = interrupt_callback;
 	sd->fmt_ctx->interrupt_callback.opaque = sd;
 
+	int64_t open_timeout_us = DEFAULT_OPEN_TIMEOUT_US;
+	if (info->open_timeout_ms > 0) {
+		if ((int64_t)info->open_timeout_ms >
+		    INT64_MAX / INT64_C(1000))
+			open_timeout_us = INT64_MAX;
+		else
+			open_timeout_us =
+				(int64_t)info->open_timeout_ms * INT64_C(1000);
+	}
+	sd->interrupt_deadline_us = saturating_add_i64(
+		av_gettime_relative(), open_timeout_us);
+
 	int ret = avformat_open_input(&sd->fmt_ctx, sd->url, format,
 				      opts ? &opts : NULL);
 	av_dict_free(&opts);
@@ -268,6 +403,7 @@ struct stream_decoder *stream_decoder_create(
 		stream_decoder_destroy(sd);
 		return NULL;
 	}
+	sd->interrupt_deadline_us = 0;
 
 	sd->has_video = init_decoder(&sd->video, sd->fmt_ctx,
 				     AVMEDIA_TYPE_VIDEO, sd->hw_decode);
@@ -281,7 +417,15 @@ struct stream_decoder *stream_decoder_create(
 		return NULL;
 	}
 
-	sd->running = true;
+	sd->packet = av_packet_alloc();
+	if (!sd->packet) {
+		if (info->open_result)
+			*info->open_result = AVERROR(ENOMEM);
+		stream_decoder_destroy(sd);
+		return NULL;
+	}
+
+	os_atomic_set_bool(&sd->running, true);
 	return sd;
 }
 
@@ -290,11 +434,12 @@ void stream_decoder_destroy(struct stream_decoder *sd)
 	if (!sd)
 		return;
 
-	sd->kill = true;
-	sd->running = false;
+	os_atomic_set_bool(&sd->kill, true);
+	os_atomic_set_bool(&sd->running, false);
 
 	free_decoder(&sd->video);
 	free_decoder(&sd->audio);
+	av_packet_free(&sd->packet);
 
 	if (sd->fmt_ctx)
 		avformat_close_input(&sd->fmt_ctx);
@@ -322,10 +467,10 @@ static void deliver_video_frame(struct stream_decoder *sd,
 	vf.width = f->width;
 	vf.height = f->height;
 	vf.format = f->format;
-	vf.colorspace = f->colorspace;
-	vf.color_range = f->color_range;
-	vf.color_trc = f->color_trc;
-	vf.color_primaries = f->color_primaries;
+	vf.colorspace = (int)f->colorspace;
+	vf.color_range = (int)f->color_range;
+	vf.color_trc = (int)f->color_trc;
+	vf.color_primaries = (int)f->color_primaries;
 	vf.keyframe = !!(f->flags & AV_FRAME_FLAG_KEY);
 	vf.max_luminance = ctx->max_luminance;
 
@@ -344,18 +489,22 @@ static void deliver_video_frame(struct stream_decoder *sd,
 		duration = av_rescale_q(duration, ctx->stream->time_base,
 					(AVRational){1, 1000000000});
 	} else {
-		/* Estimate from frame rate */
-		if (ctx->decoder->time_base.num > 0) {
-			duration = av_rescale_q(ctx->decoder->time_base.num,
-						ctx->decoder->time_base,
-						(AVRational){1, 1000000000});
+		/* Estimate from the stream's guessed display rate. Decoder
+		 * time_base is not necessarily one frame and the old calculation
+		 * multiplied its numerator twice for non-unit numerators. */
+		AVRational rate = av_guess_frame_rate(
+			sd->fmt_ctx, ctx->stream, f);
+		if (rate.num > 0 && rate.den > 0) {
+			duration = av_rescale_q(
+				1, (AVRational){rate.den, rate.num},
+				(AVRational){1, 1000000000});
 		} else {
 			duration = 33333333LL; /* ~30fps fallback */
 		}
 	}
 
 	ctx->last_pts_ns = vf.pts_ns;
-	ctx->next_pts_ns = vf.pts_ns + duration;
+	ctx->next_pts_ns = saturating_add_i64(vf.pts_ns, duration);
 
 	sd->video_cb(sd->opaque, &vf);
 }
@@ -366,6 +515,12 @@ static void deliver_audio_frame(struct stream_decoder *sd,
 	if (!sd->audio_cb)
 		return;
 
+	if (f->nb_samples <= 0 || f->sample_rate <= 0 ||
+	    f->sample_rate > 768000 ||
+	    f->ch_layout.nb_channels <= 0 ||
+	    f->ch_layout.nb_channels > 8)
+		return;
+
 	struct decoded_audio_frame af;
 	memset(&af, 0, sizeof(af));
 
@@ -373,19 +528,27 @@ static void deliver_audio_frame(struct stream_decoder *sd,
 			     ? f->ch_layout.nb_channels
 			     : 1;
 	int bytes_per_sample = av_get_bytes_per_sample(f->format);
+	if (bytes_per_sample <= 0 || planes <= 0 || planes > 8)
+		return;
 
 	for (int i = 0; i < planes && i < 8; i++) {
+		if (!f->data[i])
+			return;
 		af.data[i] = f->data[i];
-		if (av_sample_fmt_is_planar(f->format))
-			af.data_size[i] = f->nb_samples * bytes_per_sample;
-		else
-			af.data_size[i] = f->nb_samples * bytes_per_sample *
-					  f->ch_layout.nb_channels;
+		size_t samples = (size_t)f->nb_samples;
+		size_t bytes = (size_t)bytes_per_sample;
+		size_t channels = av_sample_fmt_is_planar(f->format)
+					  ? 1U
+					  : (size_t)f->ch_layout.nb_channels;
+		if (samples > SIZE_MAX / bytes ||
+		    samples * bytes > SIZE_MAX / channels)
+			return;
+		af.data_size[i] = samples * bytes * channels;
 	}
 
-	af.frames = f->nb_samples;
-	af.sample_rate = f->sample_rate;
-	af.channels = f->ch_layout.nb_channels;
+	af.frames = (uint32_t)f->nb_samples;
+	af.sample_rate = (uint32_t)f->sample_rate;
+	af.channels = (uint32_t)f->ch_layout.nb_channels;
 	af.format = f->format;
 
 	/* Convert PTS to nanoseconds */
@@ -402,24 +565,38 @@ static void deliver_audio_frame(struct stream_decoder *sd,
 			   (int64_t)f->sample_rate;
 
 	ctx->last_pts_ns = af.pts_ns;
-	ctx->next_pts_ns = af.pts_ns + duration;
+	ctx->next_pts_ns = saturating_add_i64(af.pts_ns, duration);
 
 	sd->audio_cb(sd->opaque, &af);
 }
 
-static bool decode_packet(struct stream_decoder *sd,
-			  struct stream_decode_ctx *ctx, AVPacket *pkt)
+static bool receive_frames(struct stream_decoder *sd,
+			   struct stream_decode_ctx *ctx)
 {
-	int ret = avcodec_send_packet(ctx->decoder, pkt);
-	if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
-		return false;
-
-	while (ret >= 0 || ret == AVERROR(EAGAIN)) {
-		ret = avcodec_receive_frame(ctx->decoder, ctx->frame);
+	for (;;) {
+		int ret = avcodec_receive_frame(ctx->decoder, ctx->frame);
 		if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-			break;
-		if (ret < 0)
-			return false;
+			return true;
+		if (ret < 0) {
+			int64_t now = av_gettime_relative();
+			if (now - ctx->last_error_log_us >= INT64_C(1000000)) {
+				char error_text[AV_ERROR_MAX_STRING_SIZE];
+				if (av_strerror(ret, error_text,
+					       sizeof(error_text)) < 0)
+					snprintf(error_text, sizeof(error_text),
+						 "FFmpeg error %d", ret);
+				blog(LOG_WARNING,
+				     "[obs-smooth-media] %s decoder receive dropped a corrupt frame: %s (%d)",
+				     ctx->audio ? "audio" : "video",
+				     error_text, ret);
+				ctx->last_error_log_us = now;
+			}
+			av_frame_unref(ctx->frame);
+			/* A damaged live packet/frame is recoverable; allocation
+			 * failure is not. Keep the transport and codec context so
+			 * the next valid packet/keyframe can resume decoding. */
+			return ret != AVERROR(ENOMEM);
+		}
 
 		/* For video: skip until first keyframe on network streams */
 		if (!ctx->audio && !ctx->got_first_keyframe) {
@@ -441,7 +618,12 @@ static bool decode_packet(struct stream_decoder *sd,
 				av_frame_unref(ctx->frame);
 				continue;
 			}
-			av_frame_copy_props(ctx->sw_frame, ctx->frame);
+			if (av_frame_copy_props(ctx->sw_frame,
+						ctx->frame) < 0) {
+				av_frame_unref(ctx->sw_frame);
+				av_frame_unref(ctx->frame);
+				continue;
+			}
 			out = ctx->sw_frame;
 		}
 
@@ -455,60 +637,122 @@ static bool decode_packet(struct stream_decoder *sd,
 			av_frame_unref(out);
 		av_frame_unref(ctx->frame);
 	}
+}
 
-	return true;
+static bool decode_packet(struct stream_decoder *sd,
+			  struct stream_decode_ctx *ctx, AVPacket *pkt)
+{
+	int ret = avcodec_send_packet(ctx->decoder, pkt);
+	if (ret == AVERROR(EAGAIN)) {
+		if (!receive_frames(sd, ctx))
+			return false;
+		ret = avcodec_send_packet(ctx->decoder, pkt);
+	}
+	if (ret < 0 && ret != AVERROR_EOF) {
+		int64_t now = av_gettime_relative();
+		if (now - ctx->last_error_log_us >= INT64_C(1000000)) {
+			char error_text[AV_ERROR_MAX_STRING_SIZE];
+			if (av_strerror(ret, error_text,
+				       sizeof(error_text)) < 0)
+				snprintf(error_text, sizeof(error_text),
+					 "FFmpeg error %d", ret);
+			blog(LOG_WARNING,
+			     "[obs-smooth-media] %s decoder rejected a corrupt packet: %s (%d)",
+			     ctx->audio ? "audio" : "video",
+			     error_text, ret);
+			ctx->last_error_log_us = now;
+		}
+		return ret != AVERROR(ENOMEM);
+	}
+
+	return receive_frames(sd, ctx);
 }
 
 bool stream_decoder_read_next(struct stream_decoder *sd)
 {
-	if (!sd->running || sd->kill)
+	if (!sd || !sd->fmt_ctx || !sd->packet ||
+	    !os_atomic_load_bool(&sd->running) ||
+	    os_atomic_load_bool(&sd->kill))
 		return false;
 
-	AVPacket *pkt = av_packet_alloc();
-	if (!pkt)
-		return false;
-
-	int ret = av_read_frame(sd->fmt_ctx, pkt);
+	av_packet_unref(sd->packet);
+	int ret = av_read_frame(sd->fmt_ctx, sd->packet);
+	/* FFmpeg's librist protocol returns EAGAIN whenever its finite poll
+	 * interval expires without a packet. That is an ordinary live-stream
+	 * gap, not EOF: destroying the receiver here loses libRIST's peer and
+	 * retransmission state, after which the same listener often cannot
+	 * re-handshake. Other nonblocking protocols use EAGAIN the same way.
+	 * Yield briefly so an immediately-nonblocking source cannot spin. */
+	if (ret == AVERROR(EAGAIN)) {
+		av_usleep(10000);
+		return true;
+	}
 	if (ret < 0) {
-		av_packet_free(&pkt);
-		if (ret == AVERROR_EOF || ret == AVERROR_EXIT) {
-			sd->running = false;
-			if (sd->stop_cb)
-				sd->stop_cb(sd->opaque);
+		char error_text[AV_ERROR_MAX_STRING_SIZE];
+		if (av_strerror(ret, error_text, sizeof(error_text)) < 0)
+			snprintf(error_text, sizeof(error_text),
+				 "FFmpeg error %d", ret);
+		const char *protocol = "stream";
+		if (sd->url) {
+			if (strncmp(sd->url, "rist", 4) == 0)
+				protocol = "RIST";
+			else if (strncmp(sd->url, "srt", 3) == 0)
+				protocol = "SRT";
+			else if (strncmp(sd->url, "rtmp", 4) == 0)
+				protocol = "RTMP";
 		}
-		return ret == AVERROR_EOF;
+		/* Never log the URL: live URLs commonly contain credentials. */
+		blog(LOG_WARNING,
+		     "[obs-smooth-media] %s read failed: %s (%d)",
+		     protocol, error_text, ret);
+		if (ret == AVERROR_EOF) {
+			bool ok = true;
+			if (sd->has_video)
+				ok = decode_packet(sd, &sd->video, NULL) && ok;
+			if (sd->has_audio)
+				ok = decode_packet(sd, &sd->audio, NULL) && ok;
+			(void)ok;
+		}
+		os_atomic_set_bool(&sd->running, false);
+		if (sd->stop_cb)
+			sd->stop_cb(sd->opaque);
+		return false;
 	}
 
 	/* Route packet to the correct decoder */
+	bool decoded = true;
 	if (sd->has_video &&
-	    pkt->stream_index == sd->video.stream->index) {
-		decode_packet(sd, &sd->video, pkt);
+	    sd->packet->stream_index == sd->video.stream->index) {
+		decoded = decode_packet(sd, &sd->video, sd->packet);
 	} else if (sd->has_audio &&
-		   pkt->stream_index == sd->audio.stream->index) {
-		decode_packet(sd, &sd->audio, pkt);
+		   sd->packet->stream_index == sd->audio.stream->index) {
+		decoded = decode_packet(sd, &sd->audio, sd->packet);
 	}
 
-	av_packet_free(&pkt);
-	return true;
+	if (!decoded)
+		os_atomic_set_bool(&sd->running, false);
+	return decoded;
 }
 
 void stream_decoder_request_stop(struct stream_decoder *sd)
 {
 	if (sd)
-		sd->kill = true;
+		os_atomic_set_bool(&sd->kill, true);
 }
 
 bool stream_decoder_should_stop(const struct stream_decoder *sd)
 {
-	return sd ? sd->kill : true;
+	return sd ? os_atomic_load_bool(&sd->kill) : true;
 }
 
 void stream_decoder_global_cleanup(void)
 {
+	pthread_mutex_lock(&sd_init_mutex);
 	if (sd_initialized) {
 		avformat_network_deinit();
 		sd_initialized = false;
 	}
+	pthread_mutex_unlock(&sd_init_mutex);
 }
 
 void stream_decoder_log_protocols(void)

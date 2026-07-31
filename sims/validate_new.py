@@ -1,5 +1,8 @@
 """
 Validation of the NEW closed-loop audio controller in obs-smooth-media.
+HISTORICAL MODEL: "NEW" refers to the revision in which this exploratory script
+was written. Use tests/test-timing-model.py for the maintained acceptance model.
+
 Faithful pure-math port of the rewritten logic (clock tracker, adaptive
 jitter buffer, rate-paced drain, continuous slew-limited sample-rate match).
 

@@ -4,7 +4,20 @@ project(obs-smooth-media VERSION 1.4.13)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
 
+option(BUILD_PLUGIN "Build the OBS plugin module" ON)
+option(BUILD_TESTING "Build the standalone reliability tests" OFF)
+option(ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(ENABLE_THREAD_SANITIZER "Enable ThreadSanitizer" OFF)
+
+include(CTest)
+
+if(ENABLE_SANITIZERS AND ENABLE_THREAD_SANITIZER)
+    message(FATAL_ERROR "Address/UB sanitizers cannot be combined with ThreadSanitizer")
+endif()
+
+if(BUILD_PLUGIN)
 # Find OBS libraries
 # For Windows: set OBS_DIR to the OBS Studio install or SDK path
 # e.g. cmake -DOBS_DIR="C:/obs-studio" ..
@@ -131,6 +144,18 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${AVDEVICE_LIBRARIES}
 )
 
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        /std:c11
+        /experimental:c11atomics
+        /W4
+    )
+else()
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        -Wall -Wextra -Wpedantic -Wshadow
+    )
+endif()
+
 if(WIN32)
     if(W32_PTHREADS_LIB)
         target_link_libraries(${PROJECT_NAME} PRIVATE ${W32_PTHREADS_LIB})
@@ -150,3 +175,8 @@ endif()
 
 install(TARGETS ${PROJECT_NAME} LIBRARY DESTINATION "${OBS_PLUGIN_DIR}")
 install(DIRECTORY data/ DESTINATION "${OBS_DATA_DIR}" OPTIONAL)
+endif()
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
