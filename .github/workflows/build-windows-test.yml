@@ -44,13 +44,21 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path deps -Force | Out-Null
           
-          # Fixed URL string concatenation using native PowerShell environment variables
+          # Native environment string formatting to ensure zero parsing conflicts
+          $version = "$env:OBS_VERSION"
           $url = "https://github.com"
+          $zipPath = "deps/sdk.zip"
+          $destPath = "$pwd/deps/obs-sdk"
           
-          Write-Host "Downloading Official OBS Studio SDK version $($env:OBS_VERSION)..."
-          Invoke-WebRequest -Uri $url -OutFile deps/sdk.zip -UseBasicParsing
-          Expand-Archive -Path deps/sdk.zip -DestinationPath deps/obs-sdk -Force
-          Remove-Item deps/sdk.zip
+          Write-Host "Downloading Official OBS Studio SDK version $version..."
+          Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
+          
+          # Use standard .NET extraction assembly directly to completely bypass the Windows MAX_PATH length limit
+          Write-Host "Extracting archive to absolute destination: $destPath"
+          [System.IO.Compression.ZipFile]::ExtractToDirectory((Resolve-Path $zipPath).Path, $destPath, $true)
+          
+          Remove-Item $zipPath -Force
+
 
 
       - name: Download Aligned FFmpeg Developer Assets
