@@ -10,7 +10,7 @@ on:
 
 env:
   OBS_VERSION: "32.2.1"
-  FFMPEG_VERSION: "8.0"
+  FFMPEG_VERSION: "8.1"
   PLUGIN_NAME: obs-smooth-media
   # Opt JS actions into Node 24 ahead of GitHub's forced cutover.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -37,7 +37,7 @@ jobs:
             deps/obs-studio
             deps/obs-source
             deps/ffmpeg
-          key: deps-obs${{ env.OBS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-v4
+          key: deps-obs${{ env.OBS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-v5
 
       - name: Download OBS Studio (portable)
         if: steps.cache-deps.outputs.cache-hit != 'true'
