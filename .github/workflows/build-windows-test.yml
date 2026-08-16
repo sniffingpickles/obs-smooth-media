@@ -43,12 +43,15 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path deps -Force | Out-Null
-          # Official OBS developer archive containing pre-compiled .lib files and clean build configs
-          $url = "https://github.com{{ env.OBS_VERSION }}/obs-studio-sdk-${{ env.OBS_VERSION }}-Windows-x64.zip"
-          Write-Host "Downloading Official OBS Studio SDK version ${{ env.OBS_VERSION }}..."
+          
+          # Fixed URL string concatenation using native PowerShell environment variables
+          $url = "https://github.com"
+          
+          Write-Host "Downloading Official OBS Studio SDK version $($env:OBS_VERSION)..."
           Invoke-WebRequest -Uri $url -OutFile deps/sdk.zip -UseBasicParsing
           Expand-Archive -Path deps/sdk.zip -DestinationPath deps/obs-sdk -Force
           Remove-Item deps/sdk.zip
+
 
       - name: Download Aligned FFmpeg Developer Assets
         if: steps.cache-deps.outputs.cache-hit != 'true'
