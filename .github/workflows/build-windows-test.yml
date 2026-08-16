@@ -37,7 +37,7 @@ jobs:
             deps/obs-studio
             deps/obs-source
             deps/ffmpeg
-          key: deps-obs${{ env.OBS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-v5
+          key: deps-obs${{ env.OBS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-v4
 
       - name: Download OBS Studio (portable)
         if: steps.cache-deps.outputs.cache-hit != 'true'
