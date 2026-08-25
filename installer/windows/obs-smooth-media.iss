@@ -34,7 +34,7 @@ RestartApplications=no
 UninstallDisplayName={#AppName}
 
 [Files]
-Source: "..\..\artifact\obs-plugins\64bit\{#PluginName}.dll"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion replacesameversion
+Source: "..\..\artifact\obs-plugins\64bit\{#PluginName}.dll"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion
 Source: "..\..\artifact\data\obs-plugins\{#PluginName}\*"; DestDir: "{app}\data\obs-plugins\{#PluginName}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "update.ps1"; DestDir: "{app}\data\obs-plugins\{#PluginName}"; Flags: ignoreversion
 
