@@ -134,8 +134,14 @@ bool audio_speed_convert(struct audio_speed_converter *converter,
 				   channels, output_capacity, format, 1) < 0)
 		return false;
 
+	/* Older FFmpeg headers do not mark the input-plane pointer itself const.
+	 * Pass a local pointer array so the same source builds cleanly on both
+	 * the OBS dependency SDK and distro FFmpeg packages. */
+	const uint8_t *input_planes[AUDIO_SPEED_MAX_PLANES] = {0};
+	for (int plane = 0; plane < channels; plane++)
+		input_planes[plane] = input[plane];
 	int converted = swr_convert(converter->context, planes, output_capacity,
-				    input, input_count);
+				    input_planes, input_count);
 	if (converted <= 0) {
 		audio_speed_reset(converter);
 		return false;
