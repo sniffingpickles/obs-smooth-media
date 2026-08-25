@@ -12,7 +12,8 @@ currently in beta.
 
 ## Install
 
-You need 64-bit Windows and OBS Studio 32.2.2.
+You need 64-bit Windows and OBS Studio 32.0 through 32.2. The installer
+detects the FFmpeg version included with OBS and installs the matching build.
 
 1. Download the latest Windows installer from
    [Releases](https://github.com/sniffingpickles/obs-smooth-media/releases).
@@ -20,8 +21,8 @@ You need 64-bit Windows and OBS Studio 32.2.2.
 3. Open OBS and add a **Smooth Media Source**.
 
 The installer also handles updates and clean uninstall. Use **Check for
-updates** in the Start menu, or run a newer installer over the old one. The
-portable zip is still available for manual installs.
+updates** in the Start menu, or run a newer installer over the old one.
+Version-specific portable zips are still available for manual installs.
 
 The installer is not code-signed yet, so Windows may show a SmartScreen
 warning. Release downloads include a SHA-256 digest for verification.
@@ -75,8 +76,9 @@ Remember that stream URLs can contain private keys or tokens.
 ### Windows build
 
 Install Visual Studio 2022 with the C++ desktop workload and CMake 3.16 or
-newer. The setup script downloads the exact OBS 32.2.2 runtime, source headers,
-and dependency SDK used by the release build.
+newer. The setup script downloads the OBS 32.2.2 runtime, source headers, and
+dependency SDK used by the current Windows build. Release builds also compile
+and test the FFmpeg 61 variant used by OBS 32.0 and 32.1.
 
 ```powershell
 git clone https://github.com/sniffingpickles/obs-smooth-media.git

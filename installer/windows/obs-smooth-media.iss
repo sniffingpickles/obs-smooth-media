@@ -34,7 +34,8 @@ RestartApplications=no
 UninstallDisplayName={#AppName}
 
 [Files]
-Source: "..\..\artifact\obs-plugins\64bit\{#PluginName}.dll"; DestDir: "{app}\obs-plugins\64bit"; Flags: ignoreversion
+Source: "..\..\artifact\variants\ffmpeg61\{#PluginName}.dll"; DestDir: "{app}\obs-plugins\64bit"; DestName: "{#PluginName}.dll"; Flags: ignoreversion; Check: UseFfmpeg61
+Source: "..\..\artifact\variants\ffmpeg62\{#PluginName}.dll"; DestDir: "{app}\obs-plugins\64bit"; DestName: "{#PluginName}.dll"; Flags: ignoreversion; Check: UseFfmpeg62
 Source: "..\..\artifact\data\obs-plugins\{#PluginName}\*"; DestDir: "{app}\data\obs-plugins\{#PluginName}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "update.ps1"; DestDir: "{app}\data\obs-plugins\{#PluginName}"; Flags: ignoreversion
 
@@ -50,6 +51,29 @@ Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 function IsObsDirectory(const Directory: String): Boolean;
 begin
   Result := FileExists(AddBackslash(Directory) + 'bin\64bit\obs64.exe');
+end;
+
+function GetFfmpegAbi(const Directory: String): Integer;
+var
+  BinDirectory: String;
+begin
+  BinDirectory := AddBackslash(Directory) + 'bin\64bit\';
+  if FileExists(BinDirectory + 'avformat-62.dll') then
+    Result := 62
+  else if FileExists(BinDirectory + 'avformat-61.dll') then
+    Result := 61
+  else
+    Result := 0;
+end;
+
+function UseFfmpeg61: Boolean;
+begin
+  Result := GetFfmpegAbi(ExpandConstant('{app}')) = 61;
+end;
+
+function UseFfmpeg62: Boolean;
+begin
+  Result := GetFfmpegAbi(ExpandConstant('{app}')) = 62;
 end;
 
 function GetDefaultObsDirectory(Param: String): String;
@@ -82,4 +106,13 @@ begin
       mbError, MB_OK);
     Result := False;
   end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if not IsObsDirectory(ExpandConstant('{app}')) then
+    Result := 'OBS Studio was not found in the selected folder.'
+  else if GetFfmpegAbi(ExpandConstant('{app}')) = 0 then
+    Result := 'This OBS version is not supported. Smooth Media Source currently supports 64-bit OBS 32.0 through 32.2.';
 end;

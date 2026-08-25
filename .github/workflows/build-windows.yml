@@ -9,10 +9,6 @@ on:
   workflow_dispatch:
 
 env:
-  OBS_VERSION: "32.2.2"
-  OBS_SHA256: "4d6e40e3ab155f56b30de517380566a206d74b63cdf5ad49aa596924768f97e1"
-  OBS_DEPS_VERSION: "2026-07-15"
-  OBS_DEPS_SHA256: "6f90e9598fa10cff5ad23cdcfae49b87868c07bf896b02cd464582b4ce2f2ba9"
   PLUGIN_NAME: obs-smooth-media
   # Opt JS actions into Node 24 ahead of GitHub's forced cutover.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -20,8 +16,9 @@ env:
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 30
     permissions:
-      contents: write   # allow creating a Release on tag builds
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,122 +42,195 @@ jobs:
         with:
           arch: x64
 
-      - name: Cache dependencies
+      - name: Cache OBS compatibility SDKs
         id: cache-deps
         uses: actions/cache@v4
         with:
-          path: |
-            deps/obs-studio
-            deps/obs-source
-            deps/obs-deps
-          key: deps-obs${{ env.OBS_VERSION }}-obsdeps${{ env.OBS_DEPS_VERSION }}-v1
+          path: deps
+          key: windows-compat-obs32-ffmpeg61-62-v1
 
-      - name: Download OBS Studio (portable)
+      - name: Download OBS compatibility SDKs
         if: steps.cache-deps.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
+          $ProgressPreference = "SilentlyContinue"
           New-Item -ItemType Directory -Path deps -Force | Out-Null
-          $url = "https://github.com/obsproject/obs-studio/releases/download/${{ env.OBS_VERSION }}/OBS-Studio-${{ env.OBS_VERSION }}-Windows-x64.zip"
-          Write-Host "Downloading OBS Studio ${{ env.OBS_VERSION }}..."
-          Invoke-WebRequest -Uri $url -OutFile deps/obs.zip -UseBasicParsing
-          $actualHash = (Get-FileHash deps/obs.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualHash -ne "${{ env.OBS_SHA256 }}") {
-            throw "OBS archive SHA-256 mismatch: $actualHash"
-          }
-          Expand-Archive -Path deps/obs.zip -DestinationPath deps/obs-studio -Force
-          Remove-Item deps/obs.zip
+          New-Item -ItemType Directory -Path deps/runtimes -Force | Out-Null
+          New-Item -ItemType Directory -Path deps/sources -Force | Out-Null
+          New-Item -ItemType Directory -Path deps/sdks -Force | Out-Null
 
-          # Flatten if extracted into a subdirectory
-          $sub = Get-ChildItem deps/obs-studio -Directory | Select-Object -First 1
-          if ($sub -and $sub.Name -ne "bin") {
-            Get-ChildItem $sub.FullName | Move-Item -Destination deps/obs-studio -Force
-            Remove-Item $sub.FullName -Recurse -Force -ErrorAction SilentlyContinue
+          $runtimes = @(
+            @{
+              Version = "32.0.4"
+              Hash = "fd367a7f156319426f1a600720c1288ad0011da168dff41e0f94dbb18cc1dc0f"
+            },
+            @{
+              Version = "32.1.2"
+              Hash = "8d97e4563bd8d22d03e63042aa7dccede1d555c9bd35ce8a9e5019b0d0201bf6"
+            },
+            @{
+              Version = "32.2.2"
+              Hash = "4d6e40e3ab155f56b30de517380566a206d74b63cdf5ad49aa596924768f97e1"
+            }
+          )
+          foreach ($runtime in $runtimes) {
+            $version = $runtime.Version
+            $destination = "deps/runtimes/$version"
+            $archive = "deps/obs-$version.zip"
+            $url = "https://github.com/obsproject/obs-studio/releases/download/$version/OBS-Studio-$version-Windows-x64.zip"
+            Write-Host "Downloading OBS Studio $version..."
+            Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+            $actualHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $runtime.Hash) {
+              throw "OBS $version archive SHA-256 mismatch: $actualHash"
+            }
+            Expand-Archive -Path $archive -DestinationPath $destination -Force
+            Remove-Item $archive
+
+            $obsExe = Join-Path $destination "bin/64bit/obs64.exe"
+            if (-not (Test-Path -LiteralPath $obsExe)) {
+              $nestedObs = Get-ChildItem $destination -Recurse -Filter "obs64.exe" |
+                Select-Object -First 1
+              if (-not $nestedObs) {
+                throw "OBS $version archive did not contain obs64.exe"
+              }
+              $nestedRoot = $nestedObs.Directory.Parent.Parent.FullName
+              Get-ChildItem $nestedRoot | Move-Item -Destination $destination -Force
+              Remove-Item $nestedRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            if (-not (Test-Path -LiteralPath $obsExe)) {
+              throw "OBS $version archive layout was not recognized"
+            }
           }
 
-      - name: Download OBS source headers
-        if: steps.cache-deps.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          Write-Host "Cloning OBS source for headers..."
-          git clone --depth 1 --branch ${{ env.OBS_VERSION }} --filter=blob:none --sparse `
-            https://github.com/obsproject/obs-studio.git deps/obs-source
-          Push-Location deps/obs-source
-          git sparse-checkout set libobs deps/w32-pthreads
-          Pop-Location
-
-      - name: Download OBS build dependencies
-        if: steps.cache-deps.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $version = "${{ env.OBS_DEPS_VERSION }}"
-          $url = "https://github.com/obsproject/obs-deps/releases/download/$version/windows-deps-$version-x64.zip"
-          Write-Host "Downloading OBS build dependencies $version..."
-          Invoke-WebRequest -Uri $url -OutFile deps/obs-deps.zip -UseBasicParsing
-          $actualHash = (Get-FileHash deps/obs-deps.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualHash -ne "${{ env.OBS_DEPS_SHA256 }}") {
-            throw "OBS dependency archive SHA-256 mismatch: $actualHash"
+          foreach ($version in @("32.0.4", "32.2.2")) {
+            $destination = "deps/sources/$version"
+            Write-Host "Cloning OBS $version source headers..."
+            git clone --depth 1 --branch $version --filter=blob:none --sparse `
+              https://github.com/obsproject/obs-studio.git $destination
+            Push-Location $destination
+            git sparse-checkout set libobs deps/w32-pthreads
+            Pop-Location
           }
-          Expand-Archive -Path deps/obs-deps.zip -DestinationPath deps/obs-deps -Force
-          Remove-Item deps/obs-deps.zip
+
+          $sdks = @(
+            @{
+              Version = "2025-08-23"
+              Hash = "8de229cff6f1981508c0eb646b35e644633a5855787b9f5d3b90ae2aeb87ffc1"
+            },
+            @{
+              Version = "2026-07-15"
+              Hash = "6f90e9598fa10cff5ad23cdcfae49b87868c07bf896b02cd464582b4ce2f2ba9"
+            }
+          )
+          foreach ($sdk in $sdks) {
+            $version = $sdk.Version
+            $archive = "deps/obs-deps-$version.zip"
+            $destination = "deps/sdks/$version"
+            $url = "https://github.com/obsproject/obs-deps/releases/download/$version/windows-deps-$version-x64.zip"
+            Write-Host "Downloading OBS dependencies $version..."
+            Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+            $actualHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -ne $sdk.Hash) {
+              throw "OBS dependency archive SHA-256 mismatch: $actualHash"
+            }
+            Expand-Archive -Path $archive -DestinationPath $destination -Force
+            Remove-Item $archive
+          }
 
       - name: Generate OBS import libraries
         shell: pwsh
-        run: ./scripts/generate-windows-import-libs.ps1 -ObsDirectory deps/obs-studio
-
-      - name: List dependency structure
-        shell: pwsh
         run: |
-          Write-Host "=== OBS DLLs ==="
-          Get-ChildItem deps/obs-studio -Recurse -Filter "*.dll" | Select-Object FullName
-          Write-Host ""
-          Write-Host "=== OBS generated libs ==="
-          Get-ChildItem deps/obs-studio -Recurse -Filter "*.lib" | Select-Object FullName
-          Write-Host ""
-          Write-Host "=== OBS headers ==="
-          Get-ChildItem deps/obs-source/libobs -Depth 0 | Select-Object FullName
-          Write-Host ""
-          Write-Host "=== OBS dependency libraries ==="
-          Get-ChildItem deps/obs-deps/lib -Filter "*.lib" | Select-Object FullName
-
-      - name: Configure CMake
-        shell: pwsh
-        run: |
-          $obsDir = "${{ github.workspace }}/deps/obs-studio"
-          $obsSrc = "${{ github.workspace }}/deps/obs-source"
-          $obsDepsDir = "${{ github.workspace }}/deps/obs-deps"
-
-          cmake -S . -B build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DBUILD_TESTING=OFF `
-            -DOBS_DIR="$obsDir" `
-            -DOBS_INCLUDE_DIR="$obsSrc/libobs" `
-            -DOBS_LIB="$obsDir/lib/obs.lib" `
-            -DW32_PTHREADS_INCLUDE_DIR="$obsSrc/deps/w32-pthreads" `
-            -DW32_PTHREADS_LIB="$obsDir/lib/w32-pthreads.lib" `
-            -DFFMPEG_DIR="$obsDepsDir"
-
-      - name: Build
-        run: cmake --build build --config Release
-
-      - name: Prepare artifact
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path artifact/obs-plugins/64bit -Force | Out-Null
-          New-Item -ItemType Directory -Path artifact/data/obs-plugins/${{ env.PLUGIN_NAME }} -Force | Out-Null
-
-          # Locate the module independently of single- or multi-config
-          # generator output layout.
-          $pluginDll = Get-ChildItem build -Recurse `
-            -Filter "${{ env.PLUGIN_NAME }}.dll" |
-            Select-Object -First 1
-          if (-not $pluginDll) {
-            throw "${{ env.PLUGIN_NAME }}.dll was not produced"
+          foreach ($version in @("32.0.4", "32.2.2")) {
+            ./scripts/generate-windows-import-libs.ps1 `
+              -ObsDirectory "deps/runtimes/$version" `
+              -OutputDirectory "deps/import-libs/$version"
           }
-          Copy-Item $pluginDll.FullName artifact/obs-plugins/64bit/
 
-          # Copy locale data
+      - name: Build FFmpeg 61 and 62 variants
+        shell: pwsh
+        run: |
+          $variants = @(
+            @{
+              Abi = "61"
+              ObsVersion = "32.0.4"
+              DepsVersion = "2025-08-23"
+            },
+            @{
+              Abi = "62"
+              ObsVersion = "32.2.2"
+              DepsVersion = "2026-07-15"
+            }
+          )
+
+          foreach ($variant in $variants) {
+            $abi = $variant.Abi
+            $obsVersion = $variant.ObsVersion
+            $obsDir = (Resolve-Path "deps/runtimes/$obsVersion").Path
+            $obsSrc = (Resolve-Path "deps/sources/$obsVersion").Path
+            $obsDeps = (Resolve-Path "deps/sdks/$($variant.DepsVersion)").Path
+            $importDir = (Resolve-Path "deps/import-libs/$obsVersion").Path
+            $buildDir = "build/ffmpeg$abi"
+
+            cmake -S . -B $buildDir -G Ninja `
+              -DCMAKE_BUILD_TYPE=Release `
+              -DBUILD_TESTING=OFF `
+              -DOBS_DIR="$obsDir" `
+              -DOBS_INCLUDE_DIR="$obsSrc/libobs" `
+              -DOBS_LIB="$importDir/obs.lib" `
+              -DW32_PTHREADS_INCLUDE_DIR="$obsSrc/deps/w32-pthreads" `
+              -DW32_PTHREADS_LIB="$importDir/w32-pthreads.lib" `
+              -DFFMPEG_DIR="$obsDeps"
+            if ($LASTEXITCODE -ne 0) {
+              throw "CMake configuration failed for FFmpeg $abi"
+            }
+            cmake --build $buildDir --config Release
+            if ($LASTEXITCODE -ne 0) {
+              throw "Build failed for FFmpeg $abi"
+            }
+
+            $pluginDll = Get-ChildItem $buildDir -Recurse `
+              -Filter "${{ env.PLUGIN_NAME }}.dll" | Select-Object -First 1
+            if (-not $pluginDll) {
+              throw "FFmpeg $abi plugin DLL was not produced"
+            }
+            $output = "artifact/variants/ffmpeg$abi"
+            New-Item -ItemType Directory -Path $output -Force | Out-Null
+            Copy-Item $pluginDll.FullName $output
+          }
+
+          New-Item -ItemType Directory `
+            -Path "artifact/data/obs-plugins/${{ env.PLUGIN_NAME }}" `
+            -Force | Out-Null
           if (Test-Path data) {
-            Copy-Item -Recurse data/* artifact/data/obs-plugins/${{ env.PLUGIN_NAME }}/
+            Copy-Item -Recurse data/* `
+              "artifact/data/obs-plugins/${{ env.PLUGIN_NAME }}/"
+          }
+
+      - name: Verify variant dependencies
+        shell: pwsh
+        run: |
+          $variants = @(
+            @{
+              Abi = "61"
+              Required = @("avformat-61.dll", "avcodec-61.dll", "avutil-59.dll", "swresample-5.dll")
+            },
+            @{
+              Abi = "62"
+              Required = @("avformat-62.dll", "avcodec-62.dll", "avutil-60.dll", "swresample-6.dll")
+            }
+          )
+          foreach ($variant in $variants) {
+            $dll = "artifact/variants/ffmpeg$($variant.Abi)/${{ env.PLUGIN_NAME }}.dll"
+            $imports = (& dumpbin.exe /nologo /dependents $dll) -join "`n"
+            if ($LASTEXITCODE -ne 0) {
+              throw "dumpbin failed for FFmpeg $($variant.Abi)"
+            }
+            foreach ($required in $variant.Required) {
+              if ($imports -notmatch [regex]::Escape($required)) {
+                throw "FFmpeg $($variant.Abi) build does not import $required"
+              }
+            }
           }
 
       - name: Build installer
@@ -196,93 +266,100 @@ jobs:
             throw "Inno Setup failed with exit code $LASTEXITCODE"
           }
 
-      - name: Install and verify installer
-        shell: pwsh
-        run: |
-          $setup = Resolve-Path `
-            "installer-output/${{ env.PLUGIN_NAME }}-windows-x64-setup.exe"
-          $obsDir = (Resolve-Path "deps/obs-studio").Path
-          $installLog = Join-Path $env:RUNNER_TEMP `
-            "obs-smooth-media-install.log"
-          $arguments = @(
-            "/VERYSILENT",
-            "/SUPPRESSMSGBOXES",
-            "/NORESTART",
-            "/DIR=`"$obsDir`"",
-            "/LOG=`"$installLog`""
-          )
-          $install = Start-Process -FilePath $setup -ArgumentList $arguments `
-            -PassThru
-          if (-not $install.WaitForExit(60000)) {
-            Stop-Process -Id $install.Id -Force -ErrorAction SilentlyContinue
-            throw "Installer smoke test timed out after 60 seconds"
-          }
-          if ($install.ExitCode -ne 0) {
-            throw "Installer smoke test failed with exit code $($install.ExitCode)"
-          }
-
-          $builtDll = "artifact/obs-plugins/64bit/${{ env.PLUGIN_NAME }}.dll"
-          $installedDll = Join-Path $obsDir `
-            "obs-plugins/64bit/${{ env.PLUGIN_NAME }}.dll"
-          if (-not (Test-Path -LiteralPath $installedDll)) {
-            throw "Installer did not place the plugin DLL"
-          }
-          if ((Get-FileHash $builtDll).Hash -ne
-              (Get-FileHash $installedDll).Hash) {
-            throw "Installed DLL does not match the release DLL"
-          }
-          $updater = Join-Path $obsDir `
-            "data/obs-plugins/${{ env.PLUGIN_NAME }}/update.ps1"
-          if (-not (Test-Path -LiteralPath $updater)) {
-            throw "Installer did not place the updater"
-          }
-
-      - name: Test updater
+      - name: Test installer on supported OBS versions
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          $obsDir = (Resolve-Path "deps/obs-studio").Path
-          $updater = Join-Path $obsDir `
-            "data/obs-plugins/${{ env.PLUGIN_NAME }}/update.ps1"
-          & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
-            -File $updater -CheckOnly
-          if ($LASTEXITCODE -ne 0) {
-            throw "Updater smoke test failed with exit code $LASTEXITCODE"
-          }
+          $setup = (Resolve-Path `
+            "installer-output/${{ env.PLUGIN_NAME }}-windows-x64-setup.exe").Path
+          $targets = @(
+            @{ Version = "32.0.4"; Abi = "61" },
+            @{ Version = "32.1.2"; Abi = "61" },
+            @{ Version = "32.2.2"; Abi = "62" }
+          )
 
-      - name: Uninstall and verify installer
-        shell: pwsh
-        run: |
-          $obsDir = (Resolve-Path "deps/obs-studio").Path
-          $installedDll = Join-Path $obsDir `
-            "obs-plugins/64bit/${{ env.PLUGIN_NAME }}.dll"
-          $uninstaller = Get-ChildItem -LiteralPath $obsDir `
-            -Filter "unins*.exe" | Select-Object -First 1
-          if (-not $uninstaller) {
-            throw "Installer did not create an uninstaller"
-          }
-          $uninstallLog = Join-Path $env:RUNNER_TEMP `
-            "obs-smooth-media-uninstall.log"
-          $uninstall = Start-Process -FilePath $uninstaller.FullName `
-            -ArgumentList @(
+          foreach ($target in $targets) {
+            $version = $target.Version
+            $abi = $target.Abi
+            $obsDir = (Resolve-Path "deps/runtimes/$version").Path
+            $installLog = Join-Path $env:RUNNER_TEMP `
+              "obs-smooth-media-$version-install.log"
+            $arguments = @(
               "/VERYSILENT",
               "/SUPPRESSMSGBOXES",
               "/NORESTART",
-              "/LOG=`"$uninstallLog`""
-            ) -PassThru
-          if (-not $uninstall.WaitForExit(60000)) {
-            Stop-Process -Id $uninstall.Id -Force -ErrorAction SilentlyContinue
-            throw "Uninstaller smoke test timed out after 60 seconds"
-          }
-          if ($uninstall.ExitCode -ne 0) {
-            throw "Uninstaller smoke test failed with exit code $($uninstall.ExitCode)"
-          }
-          if (Test-Path -LiteralPath $installedDll) {
-            throw "Uninstaller left the plugin DLL behind"
-          }
-          if (-not (Test-Path -LiteralPath (Join-Path $obsDir "bin/64bit/obs64.exe"))) {
-            throw "Uninstaller damaged the OBS installation"
+              "/DIR=`"$obsDir`"",
+              "/LOG=`"$installLog`""
+            )
+            $install = Start-Process -FilePath $setup -ArgumentList $arguments `
+              -PassThru
+            if (-not $install.WaitForExit(60000)) {
+              Stop-Process -Id $install.Id -Force -ErrorAction SilentlyContinue
+              throw "Installer timed out on OBS $version"
+            }
+            if ($install.ExitCode -ne 0) {
+              throw "Installer failed on OBS $version with exit code $($install.ExitCode)"
+            }
+
+            $builtDll = "artifact/variants/ffmpeg$abi/${{ env.PLUGIN_NAME }}.dll"
+            $installedDll = Join-Path $obsDir `
+              "obs-plugins/64bit/${{ env.PLUGIN_NAME }}.dll"
+            if (-not (Test-Path -LiteralPath $installedDll)) {
+              throw "Installer did not place the plugin DLL on OBS $version"
+            }
+            if ((Get-FileHash $builtDll).Hash -ne
+                (Get-FileHash $installedDll).Hash) {
+              throw "Installer chose the wrong DLL for OBS $version"
+            }
+
+            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+              -File scripts/test-windows-plugin-load.ps1 `
+              -ObsDirectory $obsDir -PluginPath $installedDll
+            if ($LASTEXITCODE -ne 0) {
+              throw "Windows could not load the plugin on OBS $version"
+            }
+
+            $updater = Join-Path $obsDir `
+              "data/obs-plugins/${{ env.PLUGIN_NAME }}/update.ps1"
+            if (-not (Test-Path -LiteralPath $updater)) {
+              throw "Installer did not place the updater on OBS $version"
+            }
+            if ($version -eq "32.2.2") {
+              & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+                -File $updater -CheckOnly
+              if ($LASTEXITCODE -ne 0) {
+                throw "Updater smoke test failed with exit code $LASTEXITCODE"
+              }
+            }
+
+            $uninstaller = Get-ChildItem -LiteralPath $obsDir `
+              -Filter "unins*.exe" | Select-Object -First 1
+            if (-not $uninstaller) {
+              throw "Installer did not create an uninstaller on OBS $version"
+            }
+            $uninstallLog = Join-Path $env:RUNNER_TEMP `
+              "obs-smooth-media-$version-uninstall.log"
+            $uninstall = Start-Process -FilePath $uninstaller.FullName `
+              -ArgumentList @(
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/LOG=`"$uninstallLog`""
+              ) -PassThru
+            if (-not $uninstall.WaitForExit(60000)) {
+              Stop-Process -Id $uninstall.Id -Force -ErrorAction SilentlyContinue
+              throw "Uninstaller timed out on OBS $version"
+            }
+            if ($uninstall.ExitCode -ne 0) {
+              throw "Uninstaller failed on OBS $version with exit code $($uninstall.ExitCode)"
+            }
+            if (Test-Path -LiteralPath $installedDll) {
+              throw "Uninstaller left the plugin DLL behind on OBS $version"
+            }
+            if (-not (Test-Path -LiteralPath (Join-Path $obsDir "bin/64bit/obs64.exe"))) {
+              throw "Uninstaller damaged OBS $version"
+            }
           }
 
       - name: Upload installer test logs
@@ -303,15 +380,35 @@ jobs:
             installer-output/*.exe
           retention-days: 90
 
-      - name: Publish release (on tag)
+      - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $zip = "${{ env.PLUGIN_NAME }}-${{ github.ref_name }}-windows-x64.zip"
-          Compress-Archive -Path artifact/* -DestinationPath $zip -Force
+          $packages = @(
+            @{
+              Abi = "61"
+              Name = "${{ env.PLUGIN_NAME }}-${{ github.ref_name }}-obs-32.0-32.1-windows-x64.zip"
+            },
+            @{
+              Abi = "62"
+              Name = "${{ env.PLUGIN_NAME }}-${{ github.ref_name }}-obs-32.2-windows-x64.zip"
+            }
+          )
+          foreach ($package in $packages) {
+            $stage = Join-Path $env:RUNNER_TEMP "portable-ffmpeg$($package.Abi)"
+            $pluginDir = Join-Path $stage "obs-plugins/64bit"
+            New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null
+            Copy-Item `
+              "artifact/variants/ffmpeg$($package.Abi)/${{ env.PLUGIN_NAME }}.dll" `
+              $pluginDir
+            Copy-Item -Recurse "artifact/data" $stage
+            Compress-Archive -Path "$stage/*" -DestinationPath $package.Name -Force
+          }
+
           $installer = "installer-output/${{ env.PLUGIN_NAME }}-windows-x64-setup.exe"
-          gh release create "${{ github.ref_name }}" $zip $installer `
+          gh release create "${{ github.ref_name }}" `
+            $packages[0].Name $packages[1].Name $installer `
             --title "${{ github.ref_name }}" `
             --generate-notes
