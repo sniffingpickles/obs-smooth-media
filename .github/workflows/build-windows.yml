@@ -163,7 +163,7 @@ jobs:
             Copy-Item -Recurse data/* artifact/data/obs-plugins/${{ env.PLUGIN_NAME }}/
           }
 
-      - name: Build and test installer
+      - name: Build installer
         shell: pwsh
         run: |
           $tokens = $null
@@ -196,17 +196,27 @@ jobs:
             throw "Inno Setup failed with exit code $LASTEXITCODE"
           }
 
+      - name: Install and verify installer
+        shell: pwsh
+        run: |
           $setup = Resolve-Path `
             "installer-output/${{ env.PLUGIN_NAME }}-windows-x64-setup.exe"
           $obsDir = (Resolve-Path "deps/obs-studio").Path
+          $installLog = Join-Path $env:RUNNER_TEMP `
+            "obs-smooth-media-install.log"
           $arguments = @(
             "/VERYSILENT",
             "/SUPPRESSMSGBOXES",
             "/NORESTART",
-            "/DIR=$obsDir"
+            "/DIR=`"$obsDir`"",
+            "/LOG=`"$installLog`""
           )
           $install = Start-Process -FilePath $setup -ArgumentList $arguments `
-            -Wait -PassThru
+            -PassThru
+          if (-not $install.WaitForExit(60000)) {
+            Stop-Process -Id $install.Id -Force -ErrorAction SilentlyContinue
+            throw "Installer smoke test timed out after 60 seconds"
+          }
           if ($install.ExitCode -ne 0) {
             throw "Installer smoke test failed with exit code $($install.ExitCode)"
           }
@@ -226,20 +236,43 @@ jobs:
           if (-not (Test-Path -LiteralPath $updater)) {
             throw "Installer did not place the updater"
           }
+
+      - name: Test updater
+        shell: pwsh
+        run: |
+          $obsDir = (Resolve-Path "deps/obs-studio").Path
+          $updater = Join-Path $obsDir `
+            "data/obs-plugins/${{ env.PLUGIN_NAME }}/update.ps1"
           & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
             -File $updater -CheckOnly
           if ($LASTEXITCODE -ne 0) {
             throw "Updater smoke test failed with exit code $LASTEXITCODE"
           }
 
+      - name: Uninstall and verify installer
+        shell: pwsh
+        run: |
+          $obsDir = (Resolve-Path "deps/obs-studio").Path
+          $installedDll = Join-Path $obsDir `
+            "obs-plugins/64bit/${{ env.PLUGIN_NAME }}.dll"
           $uninstaller = Get-ChildItem -LiteralPath $obsDir `
             -Filter "unins*.exe" | Select-Object -First 1
           if (-not $uninstaller) {
             throw "Installer did not create an uninstaller"
           }
+          $uninstallLog = Join-Path $env:RUNNER_TEMP `
+            "obs-smooth-media-uninstall.log"
           $uninstall = Start-Process -FilePath $uninstaller.FullName `
-            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") `
-            -Wait -PassThru
+            -ArgumentList @(
+              "/VERYSILENT",
+              "/SUPPRESSMSGBOXES",
+              "/NORESTART",
+              "/LOG=`"$uninstallLog`""
+            ) -PassThru
+          if (-not $uninstall.WaitForExit(60000)) {
+            Stop-Process -Id $uninstall.Id -Force -ErrorAction SilentlyContinue
+            throw "Uninstaller smoke test timed out after 60 seconds"
+          }
           if ($uninstall.ExitCode -ne 0) {
             throw "Uninstaller smoke test failed with exit code $($uninstall.ExitCode)"
           }
@@ -249,6 +282,15 @@ jobs:
           if (-not (Test-Path -LiteralPath (Join-Path $obsDir "bin/64bit/obs64.exe"))) {
             throw "Uninstaller damaged the OBS installation"
           }
+
+      - name: Upload installer test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-test-logs
+          path: ${{ runner.temp }}/obs-smooth-media-*.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

@@ -43,7 +43,8 @@ try {
     }
     $release = Invoke-RestMethod `
         -Uri "https://api.github.com/repos/$Repository/releases/latest" `
-        -Headers $headers
+        -Headers $headers `
+        -TimeoutSec 30
     $releaseVersion = ([string]$release.tag_name) -replace '^v', ''
 
     if ([version]$releaseVersion -le [version]$installedVersion) {
@@ -85,7 +86,7 @@ try {
         "obs-smooth-media-$releaseVersion-windows-x64-setup.exe"
     Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $downloadPath `
-        -UseBasicParsing
+        -UseBasicParsing -TimeoutSec 120
 
     $downloadHash = Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256
     $actualHash = $downloadHash.Hash.ToLowerInvariant()
@@ -96,6 +97,10 @@ try {
 
     Start-Process -FilePath $downloadPath -Verb RunAs
 } catch {
+    if ($CheckOnly) {
+        Write-Error $_.Exception.Message
+        exit 1
+    }
     Show-Message $_.Exception.Message `
         ([System.Windows.Forms.MessageBoxIcon]::Error)
     exit 1
