@@ -1,7 +1,7 @@
 #pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <util/threading.h>
 
 /*
@@ -27,18 +27,24 @@
 #define CLOCK_HISTORY_SIZE 2048
 
 struct clock_sample {
-	int64_t stream_pts_ns;  /* PTS from the stream (nanoseconds) */
-	int64_t wall_time_ns;   /* wall clock at time of receipt */
+	int64_t stream_pts_ns; /* PTS from the stream (nanoseconds) */
+	int64_t wall_time_ns;  /* wall clock at time of receipt */
 };
 
 struct clock_tracker {
 	struct clock_sample history[CLOCK_HISTORY_SIZE];
 	int history_count;
-	int history_head;  /* circular buffer write position */
+	int history_head; /* circular buffer write position */
+	struct clock_sample pending;
+	int64_t pending_bucket_start_ns;
+	int64_t last_filter_wall_ns;
+	bool pending_set;
 
 	/* Computed drift values */
-	double stream_rate;       /* ratio: stream_elapsed / wall_elapsed (1.0 = perfect, <1.0 = slow) */
-	int64_t drift_ns;         /* accumulated drift in nanoseconds (positive = stream behind wall) */
+	double stream_rate; /* ratio: stream_elapsed / wall_elapsed (1.0 = perfect,
+                         <1.0 = slow) */
+	int64_t drift_ns; /* accumulated drift in nanoseconds (positive = stream
+                         behind wall) */
 
 	/* Anchors: set when tracking starts */
 	int64_t anchor_stream_ns;
@@ -46,11 +52,11 @@ struct clock_tracker {
 	bool anchor_set;
 
 	/* Smoothed rate for output pacing */
-	double smoothed_rate;     /* EMA-filtered stream_rate */
+	double smoothed_rate; /* EMA-filtered stream_rate */
 
 	/* Configuration */
-	int64_t window_ns;        /* measurement window size (default: 5 seconds) */
-	double ema_alpha;         /* EMA smoothing factor (default: 0.008) */
+	int64_t window_ns; /* measurement window size (default: 5 seconds) */
+	double ema_alpha;  /* legacy configuration; filtering is time-based */
 
 	/* Guards cross-thread access: clock_tracker_record() runs on the
 	 * media thread while the smoothed rate is read on the OBS tick
@@ -64,7 +70,8 @@ void clock_tracker_free(struct clock_tracker *ct);
 void clock_tracker_reset(struct clock_tracker *ct);
 
 /* Record a stream PTS observation paired with wall time */
-void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns, int64_t wall_time_ns);
+void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns,
+			  int64_t wall_time_ns);
 
 /* Get the current measured stream rate (< 1.0 means stream is slow) */
 double clock_tracker_get_rate(struct clock_tracker *ct);
@@ -77,4 +84,5 @@ int64_t clock_tracker_get_drift(struct clock_tracker *ct);
 
 /* Given a stream PTS, compute the ideal wall-clock output time
  * accounting for measured drift. Returns adjusted timestamp in ns. */
-int64_t clock_tracker_adjust_timestamp(struct clock_tracker *ct, int64_t stream_pts_ns);
+int64_t clock_tracker_adjust_timestamp(struct clock_tracker *ct,
+				       int64_t stream_pts_ns);

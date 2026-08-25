@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(obs-smooth-media VERSION 1.4.13)
+project(obs-smooth-media VERSION 1.4.18)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -59,6 +59,21 @@ else()
     endif()
 endif()
 
+# OBS source archives contain obsconfig.h.in but not the generated
+# obsconfig.h included by obs-config.h. Standalone plugin builds only need
+# the install-path definitions below, so generate a private copy when an OBS
+# build tree did not already provide one.
+set(OBS_GENERATED_INCLUDE_DIR "")
+if(WIN32 AND NOT EXISTS "${OBS_INCLUDE_DIR}/obsconfig.h")
+    set(OBS_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/obs")
+    file(MAKE_DIRECTORY "${OBS_GENERATED_INCLUDE_DIR}")
+    configure_file(
+        cmake/obsconfig.h.in
+        "${OBS_GENERATED_INCLUDE_DIR}/obsconfig.h"
+        @ONLY
+    )
+endif()
+
 # Find FFmpeg
 find_package(PkgConfig QUIET)
 if(PKG_CONFIG_FOUND)
@@ -106,6 +121,7 @@ set(PLUGIN_SOURCES
     src/smooth-media-source.c
     src/stream-decoder.c
     src/audio-buffer.c
+    src/audio-speed.c
     src/clock-tracker.c
     src/websocket-api.c
 )
@@ -114,6 +130,7 @@ set(PLUGIN_HEADERS
     src/smooth-media-source.h
     src/stream-decoder.h
     src/audio-buffer.h
+    src/audio-speed.h
     src/clock-tracker.h
     src/websocket-api.h
     src/obs-websocket-api.h
@@ -125,6 +142,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     src
     ${OBS_INCLUDE_DIR}
     ${OBS_INCLUDE_DIRS}
+    ${OBS_GENERATED_INCLUDE_DIR}
     ${AVFORMAT_INCLUDE_DIRS}
 )
 

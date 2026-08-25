@@ -1,8 +1,8 @@
 #pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <util/threading.h>
 
 /*
@@ -24,7 +24,7 @@
 #define AUDIO_BUF_MAX_PLANES 8
 /*
  * 512 slots still keeps the structure modest, but unlike the old 128-slot
- * ring it can reach the 600 ms adaptive target with small codec frames
+ * ring it can reach the 750 ms adaptive target with small codec frames
  * (for example 120 samples / 2.5 ms at 48 kHz).
  */
 #define AUDIO_BUF_MAX_FRAMES 512
@@ -32,15 +32,15 @@
 
 struct audio_buf_frame {
 	uint8_t *data[AUDIO_BUF_MAX_PLANES];
-	uint32_t frames;          /* number of audio samples */
+	uint32_t frames; /* number of audio samples */
 	uint32_t sample_rate;
 	uint32_t channels;
-	int64_t  pts_ns;          /* stream PTS in nanoseconds */
-	int      format;          /* obs audio_format enum value */
-	int      speakers;        /* obs speaker_layout enum value */
-	size_t   data_size[AUDIO_BUF_MAX_PLANES];
-	size_t   data_capacity[AUDIO_BUF_MAX_PLANES];
-	bool     valid;
+	int64_t pts_ns; /* stream PTS in nanoseconds */
+	int format;     /* obs audio_format enum value */
+	int speakers;   /* obs speaker_layout enum value */
+	size_t data_size[AUDIO_BUF_MAX_PLANES];
+	size_t data_capacity[AUDIO_BUF_MAX_PLANES];
+	bool valid;
 };
 
 struct audio_buffer {
@@ -51,23 +51,25 @@ struct audio_buffer {
 	int count;
 
 	/* Configuration */
-	int64_t min_buffer_ns;    /* floor for the adaptive target (default: 80ms) */
-	int64_t max_buffer_ns;    /* hard latency ceiling; drop old frames past this */
+	int64_t min_buffer_ns; /* floor for the adaptive target (default: 80ms) */
+	int64_t max_buffer_ns; /* hard latency ceiling; drop old frames past this */
 
 	/* Adaptive jitter target — self-tuning, no user knobs. Grows with the
 	 * measured arrival jitter and with recent underruns; decays slowly when
 	 * the link is calm. The consumer primes at, and paces toward, this. */
-	int64_t target_buffer_ns;     /* current adaptive target depth */
-	int64_t jitter_ns;            /* RFC 3550-style smoothed arrival jitter */
-	int64_t underrun_credit_ns;   /* extra cushion accrued after underruns */
-	int64_t prev_arrival_ns;      /* wall time of previous push */
-	int64_t prev_arrival_pts_ns;  /* PTS of previous push */
-	bool    have_arrival_ref;     /* prev_arrival_* are valid */
+	int64_t target_buffer_ns;   /* current adaptive target depth */
+	int64_t jitter_ns;          /* RFC 3550-style smoothed arrival jitter */
+	int64_t underrun_credit_ns; /* extra cushion accrued after underruns */
+	int64_t delivery_gap_ns;    /* recent peak decoded-frame delivery gap */
+	int64_t last_gap_decay_ns;  /* wall time used for peak-gap decay */
+	int64_t prev_arrival_ns;    /* wall time of previous push */
+	int64_t prev_arrival_pts_ns; /* PTS of previous push */
+	bool have_arrival_ref;       /* prev_arrival_* are valid */
 
 	/* State */
-	bool primed;              /* true once we've accumulated target_buffer_ns of data */
+	bool primed; /* true once we've accumulated target_buffer_ns of data */
 	int64_t total_buffered_ns; /* approximate total buffered duration */
-	int64_t last_output_pts;  /* PTS of last output frame */
+	int64_t last_output_pts;   /* PTS of last output frame */
 
 	/* Single-consumer staging frame. audio_buffer_pop() swaps the popped
 	 * ring slot into this under the mutex and returns a pointer to it, so
@@ -88,6 +90,7 @@ struct audio_buffer_stats {
 	int64_t target_ns;
 	int64_t max_ns;
 	int64_t jitter_ns;
+	int64_t delivery_gap_ns;
 	uint64_t frames_in;
 	uint64_t frames_out;
 	uint64_t frames_dropped;
@@ -106,9 +109,8 @@ void audio_buffer_set_minimum(struct audio_buffer *ab, int64_t minimum_ns);
  * wall-clock time the frame was received (used for adaptive jitter sizing). */
 bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 		       const size_t *data_sizes, uint32_t frames,
-		       uint32_t sample_rate, uint32_t channels,
-		       int format, int speakers, int64_t pts_ns,
-		       int64_t arrival_wall_ns);
+		       uint32_t sample_rate, uint32_t channels, int format,
+		       int speakers, int64_t pts_ns, int64_t arrival_wall_ns);
 
 /* Try to pop the next audio frame. Returns false if buffer isn't ready.
  * The returned frame pointer is valid until the next pop/reset and is

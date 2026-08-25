@@ -4,6 +4,14 @@ if(WIN32)
             "Skipping native tests: w32-pthreads paths were not provided")
         return()
     endif()
+    if(NOT W32_PTHREADS_DLL)
+        find_file(W32_PTHREADS_DLL
+            NAMES w32-pthreads.dll
+            PATHS
+                "${OBS_DIR}/bin/64bit"
+                "${OBS_DIR}/bin"
+        )
+    endif()
     set(TEST_THREAD_LIBS ${W32_PTHREADS_LIB})
 else()
     find_package(Threads REQUIRED)
@@ -22,6 +30,15 @@ target_include_directories(core-tests PRIVATE
 )
 
 target_link_libraries(core-tests PRIVATE ${TEST_THREAD_LIBS})
+
+if(WIN32 AND W32_PTHREADS_DLL)
+    add_custom_command(TARGET core-tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${W32_PTHREADS_DLL}"
+            "$<TARGET_FILE_DIR:core-tests>"
+        VERBATIM
+    )
+endif()
 
 if(MSVC)
     target_compile_options(core-tests PRIVATE
@@ -85,6 +102,7 @@ if(NOT WIN32)
             libavcodec
             libavutil
             libavdevice
+            libswresample
         )
     endif()
     find_program(TEST_FFMPEG_EXECUTABLE ffmpeg)
@@ -93,6 +111,7 @@ if(NOT WIN32)
         add_executable(decoder-tests
             test-decoder.c
             ../src/stream-decoder.c
+            ../src/audio-speed.c
         )
         target_include_directories(decoder-tests PRIVATE
             ../src

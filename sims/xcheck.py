@@ -1,6 +1,6 @@
 """
-Independent cross-check of two suspected failure modes in obs-smooth-media,
-to validate the parallel agents' findings. Pure-math port of the plugin logic.
+Independent cross-check of three historical timing-controller failure modes.
+This is a pure-math port of the relevant plugin logic.
 
 HISTORICAL MODEL: this script intentionally preserves earlier constants and
 logic. Use tests/test-timing-model.py for validation of the current design.

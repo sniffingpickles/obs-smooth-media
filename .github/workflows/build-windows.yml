@@ -9,8 +9,10 @@ on:
   workflow_dispatch:
 
 env:
-  OBS_VERSION: "32.0.4"
-  FFMPEG_VERSION: "7.1"
+  OBS_VERSION: "32.2.2"
+  OBS_SHA256: "4d6e40e3ab155f56b30de517380566a206d74b63cdf5ad49aa596924768f97e1"
+  OBS_DEPS_VERSION: "2026-07-15"
+  OBS_DEPS_SHA256: "6f90e9598fa10cff5ad23cdcfae49b87868c07bf896b02cd464582b4ce2f2ba9"
   PLUGIN_NAME: obs-smooth-media
   # Opt JS actions into Node 24 ahead of GitHub's forced cutover.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -36,8 +38,8 @@ jobs:
           path: |
             deps/obs-studio
             deps/obs-source
-            deps/ffmpeg
-          key: deps-obs${{ env.OBS_VERSION }}-ffmpeg${{ env.FFMPEG_VERSION }}-v4
+            deps/obs-deps
+          key: deps-obs${{ env.OBS_VERSION }}-obsdeps${{ env.OBS_DEPS_VERSION }}-v1
 
       - name: Download OBS Studio (portable)
         if: steps.cache-deps.outputs.cache-hit != 'true'
@@ -47,6 +49,10 @@ jobs:
           $url = "https://github.com/obsproject/obs-studio/releases/download/${{ env.OBS_VERSION }}/OBS-Studio-${{ env.OBS_VERSION }}-Windows-x64.zip"
           Write-Host "Downloading OBS Studio ${{ env.OBS_VERSION }}..."
           Invoke-WebRequest -Uri $url -OutFile deps/obs.zip -UseBasicParsing
+          $actualHash = (Get-FileHash deps/obs.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne "${{ env.OBS_SHA256 }}") {
+            throw "OBS archive SHA-256 mismatch: $actualHash"
+          }
           Expand-Archive -Path deps/obs.zip -DestinationPath deps/obs-studio -Force
           Remove-Item deps/obs.zip
 
@@ -68,98 +74,24 @@ jobs:
           git sparse-checkout set libobs deps/w32-pthreads
           Pop-Location
 
-      - name: Download FFmpeg dev libraries
+      - name: Download OBS build dependencies
         if: steps.cache-deps.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          $url = "https://github.com/GyanD/codexffmpeg/releases/download/${{ env.FFMPEG_VERSION }}/ffmpeg-${{ env.FFMPEG_VERSION }}-full_build-shared.zip"
-          Write-Host "Downloading FFmpeg ${{ env.FFMPEG_VERSION }}..."
-          Invoke-WebRequest -Uri $url -OutFile deps/ffmpeg.zip -UseBasicParsing
-          Expand-Archive -Path deps/ffmpeg.zip -DestinationPath deps/ffmpeg -Force
-          Remove-Item deps/ffmpeg.zip
-
-          # Flatten if extracted into a subdirectory
-          $sub = Get-ChildItem deps/ffmpeg -Directory | Select-Object -First 1
-          if ($sub -and $sub.Name -like "ffmpeg-*") {
-            Get-ChildItem $sub.FullName | Move-Item -Destination deps/ffmpeg -Force
-            Remove-Item $sub.FullName -Recurse -Force -ErrorAction SilentlyContinue
+          $version = "${{ env.OBS_DEPS_VERSION }}"
+          $url = "https://github.com/obsproject/obs-deps/releases/download/$version/windows-deps-$version-x64.zip"
+          Write-Host "Downloading OBS build dependencies $version..."
+          Invoke-WebRequest -Uri $url -OutFile deps/obs-deps.zip -UseBasicParsing
+          $actualHash = (Get-FileHash deps/obs-deps.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne "${{ env.OBS_DEPS_SHA256 }}") {
+            throw "OBS dependency archive SHA-256 mismatch: $actualHash"
           }
+          Expand-Archive -Path deps/obs-deps.zip -DestinationPath deps/obs-deps -Force
+          Remove-Item deps/obs-deps.zip
 
-      - name: Generate OBS build stubs
+      - name: Generate OBS import libraries
         shell: pwsh
-        run: |
-          # obs-config.h includes obsconfig.h which is normally CMake-generated.
-          # Create a stub with the defines our plugin needs.
-          $stubDir = "deps/obs-source/libobs"
-          $stub = @"
-          #pragma once
-          #define OBS_INSTALL_PREFIX ""
-          #define OBS_DATA_PATH "data"
-          #define OBS_PLUGIN_DESTINATION "obs-plugins/64bit"
-          #define OBS_RELATIVE_PREFIX "../../"
-          "@
-          Set-Content -Path "$stubDir/obsconfig.h" -Value $stub
-          Write-Host "Generated obsconfig.h stub"
-
-      - name: Generate OBS import library
-        shell: pwsh
-        run: |
-          # OBS portable only ships DLLs, not .lib import libraries.
-          # Generate obs.lib from obs.dll using MSVC tools.
-          $obsDll = Get-ChildItem -Path deps/obs-studio -Recurse -Filter "obs.dll" | Select-Object -First 1
-          if (-not $obsDll) {
-            Write-Error "obs.dll not found in deps/obs-studio!"
-            exit 1
-          }
-          Write-Host "Found: $($obsDll.FullName)"
-
-          $libDir = "deps/obs-studio/lib"
-          New-Item -ItemType Directory -Path $libDir -Force | Out-Null
-
-          # Export symbols and create .def file
-          $exports = & dumpbin /exports $obsDll.FullName
-          $defContent = "LIBRARY obs`r`nEXPORTS`r`n"
-          $inExports = $false
-          foreach ($line in $exports) {
-            if ($line -match "^\s+ordinal\s+hint\s+RVA\s+name") {
-              $inExports = $true
-              continue
-            }
-            if ($inExports -and $line -match "^\s+Summary") {
-              break
-            }
-            if ($inExports -and $line -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)") {
-              $defContent += "  $($Matches[1])`r`n"
-            }
-          }
-          $defPath = "$libDir/obs.def"
-          Set-Content -Path $defPath -Value $defContent
-          Write-Host "Generated $defPath with exports"
-
-          # Generate import lib
-          & lib /def:$defPath /out:$libDir/obs.lib /machine:x64
-          Write-Host "Generated $libDir/obs.lib"
-
-          # Also generate w32-pthreads.lib
-          $ptDll = Get-ChildItem -Path deps/obs-studio -Recurse -Filter "w32-pthreads.dll" | Select-Object -First 1
-          if ($ptDll) {
-            Write-Host "Found: $($ptDll.FullName)"
-            $ptExports = & dumpbin /exports $ptDll.FullName
-            $ptDef = "LIBRARY w32-pthreads`r`nEXPORTS`r`n"
-            $inPt = $false
-            foreach ($line in $ptExports) {
-              if ($line -match "^\s+ordinal\s+hint\s+RVA\s+name") { $inPt = $true; continue }
-              if ($inPt -and $line -match "^\s+Summary") { break }
-              if ($inPt -and $line -match "^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)") {
-                $ptDef += "  $($Matches[1])`r`n"
-              }
-            }
-            Set-Content -Path "$libDir/w32-pthreads.def" -Value $ptDef
-            & lib /def:$libDir/w32-pthreads.def /out:$libDir/w32-pthreads.lib /machine:x64
-            Write-Host "Generated $libDir/w32-pthreads.lib"
-          } else {
-            Write-Host "WARNING: w32-pthreads.dll not found"
-          }
+        run: ./scripts/generate-windows-import-libs.ps1 -ObsDirectory deps/obs-studio
 
       - name: List dependency structure
         shell: pwsh
@@ -173,15 +105,15 @@ jobs:
           Write-Host "=== OBS headers ==="
           Get-ChildItem deps/obs-source/libobs -Depth 0 | Select-Object FullName
           Write-Host ""
-          Write-Host "=== FFmpeg libs ==="
-          Get-ChildItem deps/ffmpeg/lib -Filter "*.lib" | Select-Object FullName
+          Write-Host "=== OBS dependency libraries ==="
+          Get-ChildItem deps/obs-deps/lib -Filter "*.lib" | Select-Object FullName
 
       - name: Configure CMake
         shell: pwsh
         run: |
           $obsDir = "${{ github.workspace }}/deps/obs-studio"
           $obsSrc = "${{ github.workspace }}/deps/obs-source"
-          $ffmpegDir = "${{ github.workspace }}/deps/ffmpeg"
+          $obsDepsDir = "${{ github.workspace }}/deps/obs-deps"
 
           cmake -S . -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
@@ -191,7 +123,7 @@ jobs:
             -DOBS_LIB="$obsDir/lib/obs.lib" `
             -DW32_PTHREADS_INCLUDE_DIR="$obsSrc/deps/w32-pthreads" `
             -DW32_PTHREADS_LIB="$obsDir/lib/w32-pthreads.lib" `
-            -DFFMPEG_DIR="$ffmpegDir"
+            -DFFMPEG_DIR="$obsDepsDir"
 
       - name: Build
         run: cmake --build build --config Release

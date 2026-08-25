@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "audio-speed.h"
 #include "stream-decoder.h"
 
 #include <errno.h>
@@ -12,13 +13,13 @@
 
 static int failures;
 
-#define CHECK(condition)                                                     \
-	do {                                                                  \
-		if (!(condition)) {                                              \
-			fprintf(stderr, "%s:%d: CHECK failed: %s\n",             \
-				__FILE__, __LINE__, #condition);                   \
-			failures++;                                               \
-		}                                                             \
+#define CHECK(condition)                                                       \
+	do {                                                                   \
+		if (!(condition)) {                                            \
+			fprintf(stderr, "%s:%d: CHECK failed: %s\n", __FILE__, \
+				__LINE__, #condition);                         \
+			failures++;                                            \
+		}                                                              \
 	} while (0)
 
 struct decode_observer {
@@ -90,6 +91,59 @@ static void test_invalid_inputs(void)
 	};
 	CHECK(stream_decoder_create(&bad_options) == NULL);
 	CHECK(result < 0);
+}
+
+static uint64_t convert_audio_at_speed(double speed)
+{
+	struct audio_speed_converter converter;
+	audio_speed_init(&converter);
+	float samples[960 * 2];
+	for (size_t i = 0; i < sizeof(samples) / sizeof(samples[0]); i++)
+		samples[i] = (float)(i % 97) / 97.0f;
+	const uint8_t *input[AUDIO_SPEED_MAX_PLANES] = {
+		(const uint8_t *)samples,
+	};
+
+	uint64_t total = 0;
+	for (int i = 0; i < 100; i++) {
+		struct audio_speed_frame output;
+		bool converted =
+			audio_speed_convert(&converter, input, 960, 48000, 2,
+					    AV_SAMPLE_FMT_FLT, speed, &output);
+		CHECK(converted);
+		if (!converted)
+			break;
+		CHECK(output.frames > 0);
+		CHECK(output.data[0] != NULL);
+		CHECK(output.data_size[0] ==
+		      (size_t)output.frames * 2 * sizeof(float));
+		total += output.frames;
+	}
+	audio_speed_free(&converter);
+	return total;
+}
+
+static void test_audio_speed_conversion(void)
+{
+	const uint64_t input_frames = 96000;
+	uint64_t normal = convert_audio_at_speed(1.0);
+	uint64_t faster = convert_audio_at_speed(1.05);
+	uint64_t slower = convert_audio_at_speed(0.95);
+
+	CHECK(normal <= input_frames);
+	CHECK(normal + 1024 >= input_frames);
+	CHECK(faster < normal);
+	CHECK(slower > normal);
+
+	struct audio_speed_converter converter;
+	audio_speed_init(&converter);
+	struct audio_speed_frame output;
+	CHECK(!audio_speed_convert(&converter, NULL, 960, 48000, 2,
+				   AV_SAMPLE_FMT_FLT, 1.0, &output));
+	CHECK(!audio_speed_convert(&converter, (const uint8_t *const[]){NULL},
+				   960, 48000, 2, AV_SAMPLE_FMT_FLT, 1.0,
+				   &output));
+	audio_speed_free(&converter);
 }
 
 static void test_decode_file(const char *path)
@@ -249,12 +303,13 @@ static void test_blocking_open_deadline(void)
 int main(int argc, char **argv)
 {
 	if (argc != 3) {
-		fprintf(stderr,
-			"usage: %s TEST_MEDIA CORRUPT_TEST_MEDIA\n", argv[0]);
+		fprintf(stderr, "usage: %s TEST_MEDIA CORRUPT_TEST_MEDIA\n",
+			argv[0]);
 		return EXIT_FAILURE;
 	}
 
 	test_invalid_inputs();
+	test_audio_speed_conversion();
 	test_decode_file(argv[1]);
 	test_corrupt_stream_recovery(argv[2]);
 	test_blocking_open_abort();

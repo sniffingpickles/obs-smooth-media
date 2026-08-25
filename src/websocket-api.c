@@ -7,9 +7,7 @@
 
 static obs_websocket_vendor vendor = NULL;
 
-/* ──────────────────────────────────────────────
- *  Helper: find a smooth_media_source by source name
- * ────────────────────────────────────────────── */
+/* Source lookup */
 
 struct source_find_ctx {
 	const char *name;
@@ -40,10 +38,7 @@ static obs_source_t *find_smooth_source(const char *name)
 	return ctx.source;
 }
 
-/* ──────────────────────────────────────────────
- *  Request: SetStreamURL
- *  { "sourceName": "...", "url": "rtmp://..." }
- * ────────────────────────────────────────────── */
+/* SetStreamURL: { "sourceName": "...", "url": "rtmp://..." } */
 
 static void on_set_stream_url(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
 {
@@ -87,10 +82,7 @@ static void on_set_stream_url(obs_data_t *request_data, obs_data_t *response_dat
 	obs_data_set_string(response_data, "url", url);
 }
 
-/* ──────────────────────────────────────────────
- *  Request: GetStreamURL
- *  { "sourceName": "..." }
- * ────────────────────────────────────────────── */
+/* GetStreamURL: { "sourceName": "..." } */
 
 static void on_get_stream_url(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
 {
@@ -120,10 +112,7 @@ static void on_get_stream_url(obs_data_t *request_data, obs_data_t *response_dat
 	obs_source_release(source);
 }
 
-/* ──────────────────────────────────────────────
- *  Request: GetStatus
- *  { "sourceName": "..." }
- * ────────────────────────────────────────────── */
+/* GetStatus: { "sourceName": "..." } */
 
 static void on_get_status(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
 {
@@ -192,10 +181,7 @@ static void on_get_status(obs_data_t *request_data, obs_data_t *response_data, v
 	obs_source_release(source);
 }
 
-/* ──────────────────────────────────────────────
- *  Request: RestartSource
- *  { "sourceName": "..." }
- * ────────────────────────────────────────────── */
+/* RestartSource: { "sourceName": "..." } */
 
 static void on_restart_source(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
 {
@@ -228,10 +214,7 @@ static void on_restart_source(obs_data_t *request_data, obs_data_t *response_dat
 	obs_data_set_bool(response_data, "success", true);
 }
 
-/* ──────────────────────────────────────────────
- *  Request: ListSources
- *  (no parameters)
- * ────────────────────────────────────────────── */
+/* ListSources: no parameters */
 
 struct source_list_ctx {
 	obs_data_array_t *array;
@@ -271,9 +254,7 @@ static void on_list_sources(obs_data_t *request_data, obs_data_t *response_data,
 	obs_data_array_release(array);
 }
 
-/* ──────────────────────────────────────────────
- *  Public API
- * ────────────────────────────────────────────── */
+/* Public API */
 
 void smooth_media_websocket_init(void)
 {

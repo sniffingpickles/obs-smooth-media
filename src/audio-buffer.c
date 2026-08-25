@@ -4,16 +4,18 @@
 #include <string.h>
 
 #define DEFAULT_MIN_BUFFER_NS  (80000000LL)   /* 80ms floor */
-#define DEFAULT_MAX_BUFFER_NS  (500000000LL)  /* 500ms ceiling (start value) */
+#define DEFAULT_MAX_BUFFER_NS  (500000000LL)  /* 500ms initial ceiling */
 
 /* Adaptive-target tuning (all self-managed; no user-facing knobs). */
-#define TARGET_JITTER_COEF     3              /* target = floor + 3·jitter */
-#define TARGET_CAP_NS          (600000000LL)  /* never aim above 600ms latency */
-#define MAX_HARD_CAP_NS        (1200000000LL) /* absolute latency ceiling 1.2s */
-#define MAX_MARGIN_NS          (250000000LL)  /* drop level = target + 250ms */
-#define UNDERRUN_CREDIT_STEP_NS (60000000LL)  /* +60ms cushion per underrun */
-#define UNDERRUN_CREDIT_CAP_NS  (400000000LL) /* credit caps at +400ms */
-#define UNDERRUN_CREDIT_DECAY_NS (500000LL)   /* decay ~0.5ms/frame (~23ms/s) */
+#define TARGET_JITTER_COEF       3              /* target = floor + 3·jitter */
+#define TARGET_CAP_NS            (750000000LL)  /* extreme-link target cap */
+#define MAX_HARD_CAP_NS          (1200000000LL) /* absolute 1.2s ceiling */
+#define MAX_MARGIN_NS            (250000000LL)  /* drop at target + 250ms */
+#define DELIVERY_GAP_MARGIN_NS   (40000000LL)   /* scheduling headroom */
+#define DELIVERY_GAP_DECAY_DIV   20             /* peak decays 50ms/s */
+#define UNDERRUN_CREDIT_STEP_NS  (60000000LL)   /* +60ms per starvation */
+#define UNDERRUN_CREDIT_CAP_NS   (400000000LL)  /* credit cap */
+#define UNDERRUN_CREDIT_DECAY_NS (500000LL)     /* ~23ms/s at AAC cadence */
 /* Retain ordinary codec-frame allocations for reuse, but release unusually
  * large slots. Otherwise a hostile sequence can rotate a multi-megabyte frame
  * through every ring slot and leave gigabytes resident after it is dropped. */
@@ -49,8 +51,7 @@ static bool frame_storage_is_large(const struct audio_buf_frame *f)
 {
 	size_t total = 0;
 	for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++) {
-		if (f->data_capacity[i] >
-		    RETAINED_FRAME_CAPACITY_MAX - total)
+		if (f->data_capacity[i] > RETAINED_FRAME_CAPACITY_MAX - total)
 			return true;
 		total += f->data_capacity[i];
 	}
@@ -83,8 +84,7 @@ bool audio_buffer_init(struct audio_buffer *ab)
 static void recalc_target(struct audio_buffer *ab)
 {
 	int64_t target = ab->min_buffer_ns;
-	if (ab->jitter_ns >
-	    (TARGET_CAP_NS - target) / TARGET_JITTER_COEF) {
+	if (ab->jitter_ns > (TARGET_CAP_NS - target) / TARGET_JITTER_COEF) {
 		target = TARGET_CAP_NS;
 	} else {
 		target += TARGET_JITTER_COEF * ab->jitter_ns;
@@ -93,6 +93,15 @@ static void recalc_target(struct audio_buffer *ab)
 		target = TARGET_CAP_NS;
 	else
 		target += ab->underrun_credit_ns;
+	if (ab->delivery_gap_ns > 0) {
+		int64_t gap_target = ab->delivery_gap_ns;
+		if (gap_target > TARGET_CAP_NS - DELIVERY_GAP_MARGIN_NS)
+			gap_target = TARGET_CAP_NS;
+		else
+			gap_target += DELIVERY_GAP_MARGIN_NS;
+		if (target < gap_target)
+			target = gap_target;
+	}
 	ab->target_buffer_ns = target;
 
 	int64_t cap = target + MAX_MARGIN_NS;
@@ -136,6 +145,8 @@ void audio_buffer_reset(struct audio_buffer *ab)
 	ab->prev_arrival_ns = 0;
 	ab->prev_arrival_pts_ns = 0;
 	ab->have_arrival_ref = false;
+	ab->delivery_gap_ns = 0;
+	ab->last_gap_decay_ns = 0;
 	ab->primed = false;
 	ab->total_buffered_ns = 0;
 	ab->last_output_pts = -1;
@@ -174,8 +185,7 @@ static void drop_oldest(struct audio_buffer *ab)
 		return;
 
 	struct audio_buf_frame *f = &ab->frames[ab->read_pos];
-	ab->total_buffered_ns -=
-		frame_duration_ns(f->frames, f->sample_rate);
+	ab->total_buffered_ns -= frame_duration_ns(f->frames, f->sample_rate);
 	if (ab->total_buffered_ns < 0)
 		ab->total_buffered_ns = 0;
 	clear_frame_for_reuse(f);
@@ -185,8 +195,7 @@ static void drop_oldest(struct audio_buffer *ab)
 }
 
 static bool valid_push(const uint8_t *const *data, const size_t *data_sizes,
-		       uint32_t frames, uint32_t sample_rate,
-		       uint32_t channels)
+		       uint32_t frames, uint32_t sample_rate, uint32_t channels)
 {
 	if (!data || !data_sizes || frames == 0 || sample_rate == 0 ||
 	    channels == 0 || channels > AUDIO_BUF_MAX_PLANES)
@@ -211,9 +220,8 @@ static bool valid_push(const uint8_t *const *data, const size_t *data_sizes,
 
 bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 		       const size_t *data_sizes, uint32_t frames,
-		       uint32_t sample_rate, uint32_t channels,
-		       int format, int speakers, int64_t pts_ns,
-		       int64_t arrival_wall_ns)
+		       uint32_t sample_rate, uint32_t channels, int format,
+		       int speakers, int64_t pts_ns, int64_t arrival_wall_ns)
 {
 	if (!ab || !valid_push(data, data_sizes, frames, sample_rate, channels))
 		return false;
@@ -223,24 +231,41 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 	/* ── Adaptive jitter estimation (RFC 3550 interarrival jitter) ──
 	 * D = (arrival_n - arrival_{n-1}) - (pts_n - pts_{n-1}): how much the
 	 * delivery gap deviated from the media gap. J += (|D| - J)/16. */
-	if (ab->have_arrival_ref &&
-	    arrival_wall_ns >= ab->prev_arrival_ns &&
+	if (ab->have_arrival_ref && arrival_wall_ns >= ab->prev_arrival_ns &&
 	    pts_ns >= ab->prev_arrival_pts_ns) {
-		uint64_t arrival_delta =
-			(uint64_t)arrival_wall_ns -
-			(uint64_t)ab->prev_arrival_ns;
+		uint64_t arrival_delta = (uint64_t)arrival_wall_ns -
+					 (uint64_t)ab->prev_arrival_ns;
 		uint64_t pts_delta =
-			(uint64_t)pts_ns -
-			(uint64_t)ab->prev_arrival_pts_ns;
+			(uint64_t)pts_ns - (uint64_t)ab->prev_arrival_pts_ns;
 		uint64_t diff = arrival_delta > pts_delta
 					? arrival_delta - pts_delta
 					: pts_delta - arrival_delta;
-		int64_t d = diff > (uint64_t)INT64_MAX
-				    ? INT64_MAX
-				    : (int64_t)diff;
+		int64_t d =
+			diff > (uint64_t)INT64_MAX ? INT64_MAX : (int64_t)diff;
 		ab->jitter_ns += (d - ab->jitter_ns) / 16;
 		if (ab->jitter_ns < 0)
 			ab->jitter_ns = 0;
+
+		/* Preserve the recent peak delivery gap. RFC-style jitter is an
+		 * average and underestimates protocols that release a large group
+		 * every few hundred milliseconds: the many zero-gap frames in the
+		 * group immediately wash out the one important gap. */
+		if (ab->last_gap_decay_ns != 0 &&
+		    arrival_wall_ns > ab->last_gap_decay_ns) {
+			int64_t elapsed =
+				arrival_wall_ns - ab->last_gap_decay_ns;
+			int64_t decay = elapsed / DELIVERY_GAP_DECAY_DIV;
+			ab->delivery_gap_ns =
+				decay >= ab->delivery_gap_ns
+					? 0
+					: ab->delivery_gap_ns - decay;
+		}
+		ab->last_gap_decay_ns = arrival_wall_ns;
+		int64_t arrival_delta_ns = arrival_delta > (uint64_t)INT64_MAX
+						   ? INT64_MAX
+						   : (int64_t)arrival_delta;
+		if (arrival_delta_ns > ab->delivery_gap_ns)
+			ab->delivery_gap_ns = arrival_delta_ns;
 	}
 	ab->prev_arrival_ns = arrival_wall_ns;
 	ab->prev_arrival_pts_ns = pts_ns;
@@ -257,8 +282,7 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 
 	struct audio_buf_frame *f = &ab->frames[ab->write_pos];
 	bool release_on_full_drop =
-		ab->count >= AUDIO_BUF_MAX_FRAMES &&
-		frame_storage_is_large(f);
+		ab->count >= AUDIO_BUF_MAX_FRAMES && frame_storage_is_large(f);
 
 	/* Allocate every required growth before modifying the queue or the slot.
 	 * A failed allocation therefore leaves both the old frame and all ring
@@ -315,8 +339,7 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
 	/* Enforce the latency ceiling after adding the new frame. Keep at least
 	 * the newest frame so a legal but unusually large decoder frame cannot
 	 * turn the buffer into a permanent empty/underrun loop. */
-	while (ab->count > 1 &&
-	       ab->total_buffered_ns > ab->max_buffer_ns)
+	while (ab->count > 1 && ab->total_buffered_ns > ab->max_buffer_ns)
 		drop_oldest(ab);
 
 	/* Check if primed — against the adaptive target, not a fixed floor */
@@ -345,12 +368,10 @@ void audio_buffer_trim_to_target(struct audio_buffer *ab)
 		return;
 	pthread_mutex_lock(&ab->mutex);
 	while (ab->count > 1) {
-		struct audio_buf_frame *oldest =
-			&ab->frames[ab->read_pos];
+		struct audio_buf_frame *oldest = &ab->frames[ab->read_pos];
 		int64_t after_drop =
 			ab->total_buffered_ns -
-			frame_duration_ns(oldest->frames,
-					  oldest->sample_rate);
+			frame_duration_ns(oldest->frames, oldest->sample_rate);
 		if (after_drop < ab->target_buffer_ns)
 			break;
 		drop_oldest(ab);
@@ -432,6 +453,7 @@ void audio_buffer_get_stats(struct audio_buffer *ab,
 	stats->target_ns = ab->target_buffer_ns;
 	stats->max_ns = ab->max_buffer_ns;
 	stats->jitter_ns = ab->jitter_ns;
+	stats->delivery_gap_ns = ab->delivery_gap_ns;
 	stats->frames_in = ab->frames_in;
 	stats->frames_out = ab->frames_out;
 	stats->frames_dropped = ab->frames_dropped;

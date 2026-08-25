@@ -1,76 +1,76 @@
 @echo off
-REM ============================================================
-REM  Build script for obs-smooth-media plugin (Windows)
-REM
-REM  Prerequisites:
-REM    1. Visual Studio 2022 (with C++ Desktop Development)
-REM    2. CMake 3.16+ (in PATH)
-REM    3. OBS Studio installed or portable
-REM    4. FFmpeg dev libs (headers + import libs)
-REM
-REM  Usage:
-REM    build-windows.bat [OBS_DIR] [FFMPEG_DIR]
-REM
-REM  Example:
-REM    build-windows.bat "C:\obs-studio" "C:\ffmpeg"
-REM ============================================================
-
 setlocal
 
-set OBS_DIR=%~1
-set FFMPEG_DIR=%~2
+set "PROJECT_DIR=%~dp0"
+if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
+set "OBS_DIR=%~f1"
+set "OBS_DEPS_DIR=%~f2"
 
-if "%OBS_DIR%"=="" (
-    echo Usage: build-windows.bat [OBS_DIR] [FFMPEG_DIR]
-    echo.
-    echo   OBS_DIR    = Path to OBS Studio install (contains bin/, include/, lib/)
-    echo   FFMPEG_DIR = Path to FFmpeg dev package (contains include/, lib/)
-    echo.
-    echo   If OBS includes FFmpeg headers/libs, you can set FFMPEG_DIR = OBS_DIR.
+if "%~1"=="" goto :usage
+if "%~2"=="" goto :usage
+
+if "%~3"=="" (
+    for %%I in ("%OBS_DIR%\..\obs-source") do set "OBS_SOURCE_DIR=%%~fI"
+) else (
+    set "OBS_SOURCE_DIR=%~f3"
+)
+
+if not exist "%OBS_DIR%\bin" (
+    echo OBS runtime not found at "%OBS_DIR%".
+    exit /b 1
+)
+if not exist "%OBS_SOURCE_DIR%\libobs\obs-module.h" (
+    echo OBS source headers not found at "%OBS_SOURCE_DIR%\libobs".
+    exit /b 1
+)
+if not exist "%OBS_DEPS_DIR%\include\libavformat\avformat.h" (
+    echo OBS build dependencies not found at "%OBS_DEPS_DIR%".
     exit /b 1
 )
 
-if "%FFMPEG_DIR%"=="" set FFMPEG_DIR=%OBS_DIR%
+where dumpbin.exe >nul 2>nul
+if errorlevel 1 call :setup_msvc
+if errorlevel 1 exit /b 1
 
-echo.
-echo === Building obs-smooth-media ===
-echo OBS_DIR:    %OBS_DIR%
-echo FFMPEG_DIR: %FFMPEG_DIR%
-echo.
+powershell -NoProfile -ExecutionPolicy Bypass ^
+    -File "%PROJECT_DIR%\scripts\generate-windows-import-libs.ps1" ^
+    -ObsDirectory "%OBS_DIR%"
+if errorlevel 1 exit /b 1
 
-if not exist build_win mkdir build_win
-cd build_win
-
-cmake .. -G "Visual Studio 17 2022" -A x64 ^
+cmake -S "%PROJECT_DIR%" -B "%PROJECT_DIR%\build_win" ^
+    -G "Visual Studio 17 2022" -A x64 ^
     -DOBS_DIR="%OBS_DIR%" ^
-    -DFFMPEG_DIR="%FFMPEG_DIR%" ^
+    -DOBS_INCLUDE_DIR="%OBS_SOURCE_DIR%\libobs" ^
+    -DOBS_LIB="%OBS_DIR%\lib\obs.lib" ^
+    -DW32_PTHREADS_INCLUDE_DIR="%OBS_SOURCE_DIR%\deps\w32-pthreads" ^
+    -DW32_PTHREADS_LIB="%OBS_DIR%\lib\w32-pthreads.lib" ^
+    -DFFMPEG_DIR="%OBS_DEPS_DIR%" ^
     -DBUILD_TESTING=OFF
+if errorlevel 1 exit /b 1
 
-if %ERRORLEVEL% neq 0 (
-    echo.
-    echo CMake configuration failed!
+cmake --build "%PROJECT_DIR%\build_win" --config Release
+if errorlevel 1 exit /b 1
+
+echo Built: %PROJECT_DIR%\build_win\Release\obs-smooth-media.dll
+exit /b 0
+
+:setup_msvc
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if not exist "%VSWHERE%" (
+    echo Visual Studio locator not found at "%VSWHERE%".
     exit /b 1
 )
-
-cmake --build . --config Release
-
-if %ERRORLEVEL% neq 0 (
-    echo.
-    echo Build failed!
+for /f "usebackq tokens=*" %%I in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS_DIR=%%I"
+if not defined VS_DIR (
+    echo Visual Studio 2022 with the C++ desktop workload was not found.
     exit /b 1
 )
+call "%VS_DIR%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+exit /b %errorlevel%
 
+:usage
+echo Usage: build-windows.bat OBS_DIR OBS_DEPS_DIR [OBS_SOURCE_DIR]
 echo.
-echo === Build successful! ===
-echo.
-echo Plugin DLL: build_win\Release\obs-smooth-media.dll
-echo.
-echo To install, copy the DLL to your OBS plugins directory:
-echo   %OBS_DIR%\obs-plugins\64bit\obs-smooth-media.dll
-echo.
-echo And copy locale data:
-echo   xcopy /s /i ..\data %OBS_DIR%\data\obs-plugins\obs-smooth-media
-echo.
-
-cd ..
-endlocal
+echo Run setup-windows-deps.ps1 first, then use:
+echo   build-windows.bat "deps\obs-studio" "deps\obs-deps"
+exit /b 1

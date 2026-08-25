@@ -7,4 +7,4 @@ acceptance tests for the current implementation.
 
 The maintained executable timing specification is
 `tests/test-timing-model.py`. The compiled core and decoder tests are under
-`tests/`; see `docs/testing.md` for the supported test and sanitizer commands.
+`tests/`; see the main README for the supported test commands.

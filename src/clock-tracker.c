@@ -1,14 +1,17 @@
 #include "clock-tracker.h"
 #include <limits.h>
-#include <string.h>
 #include <math.h>
+#include <string.h>
 
-#define DEFAULT_WINDOW_NS  (5000000000LL)  /* 5 seconds */
-/* Per-frame EMA factor. At ~47 updates/sec this gives a time constant of
- * ~1/(alpha*47) ≈ 2.7 s — slow enough to ride over the 1–4 s delivery
- * bursts that bonded cellular (SRTLA) produces without chasing them, while
- * still tracking genuine sustained clock drift. */
-#define DEFAULT_EMA_ALPHA  0.008
+#define DEFAULT_WINDOW_NS (5000000000LL) /* 5 seconds */
+/* Decoded audio commonly arrives as a tight burst every few hundred
+ * milliseconds. Keep only the end of each delivery burst (or a periodic
+ * endpoint for smoothly delivered audio); treating every frame as an equal
+ * rate sample biases the estimate toward the burst itself. */
+#define DELIVERY_CLUSTER_GAP_NS (100000000LL)
+#define SAMPLE_BUCKET_NS (250000000LL)
+#define FILTER_TIME_CONSTANT_NS (2700000000.0)
+#define DEFAULT_EMA_ALPHA 0.008
 
 bool clock_tracker_init(struct clock_tracker *ct)
 {
@@ -42,6 +45,10 @@ static void reset_measurement(struct clock_tracker *ct)
 	ct->anchor_stream_ns = 0;
 	ct->anchor_wall_ns = 0;
 	ct->anchor_set = false;
+	memset(&ct->pending, 0, sizeof(ct->pending));
+	ct->pending_bucket_start_ns = 0;
+	ct->last_filter_wall_ns = 0;
+	ct->pending_set = false;
 }
 
 void clock_tracker_reset(struct clock_tracker *ct)
@@ -58,45 +65,19 @@ void clock_tracker_reset(struct clock_tracker *ct)
 	pthread_mutex_unlock(&ct->mutex);
 }
 
-void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns,
-			  int64_t wall_time_ns)
+static void commit_sample(struct clock_tracker *ct,
+			  const struct clock_sample *sample)
 {
-	if (!ct)
-		return;
-
-	pthread_mutex_lock(&ct->mutex);
-
-	/* A timestamp discontinuity starts a fresh measurement epoch. Letting a
-	 * backwards PTS or wall clock into the regression clamps the rate at
-	 * 0.90/1.10 for seconds and can audibly perturb playback. Exact
-	 * duplicates carry no rate information and are ignored. */
-	if (ct->history_count > 0) {
-		int latest_idx =
-			(ct->history_head - 1 + CLOCK_HISTORY_SIZE) %
-			CLOCK_HISTORY_SIZE;
-		const struct clock_sample *latest =
-			&ct->history[latest_idx];
-		if (stream_pts_ns < latest->stream_pts_ns ||
-		    wall_time_ns < latest->wall_time_ns) {
-			reset_measurement(ct);
-		} else if (stream_pts_ns == latest->stream_pts_ns ||
-			   wall_time_ns == latest->wall_time_ns) {
-			pthread_mutex_unlock(&ct->mutex);
-			return;
-		}
-	}
-
 	/* Set anchor on first sample */
 	if (!ct->anchor_set) {
-		ct->anchor_stream_ns = stream_pts_ns;
-		ct->anchor_wall_ns = wall_time_ns;
+		ct->anchor_stream_ns = sample->stream_pts_ns;
+		ct->anchor_wall_ns = sample->wall_time_ns;
 		ct->anchor_set = true;
 	}
 
 	/* Store in circular buffer */
 	int idx = ct->history_head;
-	ct->history[idx].stream_pts_ns = stream_pts_ns;
-	ct->history[idx].wall_time_ns = wall_time_ns;
+	ct->history[idx] = *sample;
 	ct->history_head = (ct->history_head + 1) % CLOCK_HISTORY_SIZE;
 	if (ct->history_count < CLOCK_HISTORY_SIZE)
 		ct->history_count++;
@@ -105,17 +86,16 @@ void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns,
 	 * Find the oldest sample within the window and compute
 	 * stream_elapsed / wall_elapsed. */
 	int oldest_idx = -1;
-	int64_t oldest_wall = wall_time_ns;
+	int64_t oldest_wall = sample->wall_time_ns;
 
 	for (int i = 0; i < ct->history_count; i++) {
-		int si = (ct->history_head - 1 - i +
-			  CLOCK_HISTORY_SIZE) %
+		int si = (ct->history_head - 1 - i + CLOCK_HISTORY_SIZE) %
 			 CLOCK_HISTORY_SIZE;
 		int64_t sample_wall = ct->history[si].wall_time_ns;
 
 		/* Only consider samples within the window */
-		uint64_t age = (uint64_t)wall_time_ns -
-			       (uint64_t)sample_wall;
+		uint64_t age =
+			(uint64_t)sample->wall_time_ns - (uint64_t)sample_wall;
 		if (age > (uint64_t)ct->window_ns)
 			break;
 
@@ -127,10 +107,10 @@ void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns,
 
 	if (oldest_idx >= 0) {
 		long double wall_elapsed =
-			(long double)wall_time_ns -
+			(long double)sample->wall_time_ns -
 			(long double)ct->history[oldest_idx].wall_time_ns;
 		long double stream_elapsed =
-			(long double)stream_pts_ns -
+			(long double)sample->stream_pts_ns -
 			(long double)ct->history[oldest_idx].stream_pts_ns;
 
 		if (wall_elapsed > 100000000.0L &&
@@ -147,21 +127,30 @@ void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns,
 			if (ct->stream_rate > 1.10)
 				ct->stream_rate = 1.10;
 
-			/* Update EMA */
-			ct->smoothed_rate =
-				ct->ema_alpha * ct->stream_rate +
-				(1.0 - ct->ema_alpha) * ct->smoothed_rate;
+			/* Time-based filtering gives a delivery burst the same
+			 * influence as smoothly delivered audio. A per-frame EMA
+			 * overweights protocols that release many frames at once. */
+			int64_t filter_elapsed =
+				ct->last_filter_wall_ns == 0
+					? SAMPLE_BUCKET_NS
+					: sample->wall_time_ns -
+						  ct->last_filter_wall_ns;
+			if (filter_elapsed < 0)
+				filter_elapsed = 0;
+			double alpha = 1.0 - exp(-(double)filter_elapsed /
+						 FILTER_TIME_CONSTANT_NS);
+			ct->smoothed_rate +=
+				alpha * (ct->stream_rate - ct->smoothed_rate);
+			ct->last_filter_wall_ns = sample->wall_time_ns;
 		}
 	}
 
 	/* Compute absolute drift without signed-overflow UB if a malformed
 	 * stream supplies extreme timestamps. */
-	long double stream_elapsed =
-		(long double)stream_pts_ns -
-		(long double)ct->anchor_stream_ns;
-	long double wall_elapsed =
-		(long double)wall_time_ns -
-		(long double)ct->anchor_wall_ns;
+	long double stream_elapsed = (long double)sample->stream_pts_ns -
+				     (long double)ct->anchor_stream_ns;
+	long double wall_elapsed = (long double)sample->wall_time_ns -
+				   (long double)ct->anchor_wall_ns;
 	long double drift = wall_elapsed - stream_elapsed;
 	if (drift > (long double)INT64_MAX)
 		ct->drift_ns = INT64_MAX;
@@ -169,6 +158,56 @@ void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns,
 		ct->drift_ns = INT64_MIN;
 	else
 		ct->drift_ns = (int64_t)drift;
+}
+
+void clock_tracker_record(struct clock_tracker *ct, int64_t stream_pts_ns,
+			  int64_t wall_time_ns)
+{
+	if (!ct)
+		return;
+
+	pthread_mutex_lock(&ct->mutex);
+
+	/* A timestamp discontinuity starts a fresh measurement epoch. Letting a
+	 * backwards PTS or wall clock into the regression clamps the rate at
+	 * 0.90/1.10 for seconds and can audibly perturb playback. Exact
+	 * duplicates carry no rate information and are ignored. */
+	if (ct->pending_set) {
+		if (stream_pts_ns < ct->pending.stream_pts_ns ||
+		    wall_time_ns < ct->pending.wall_time_ns) {
+			reset_measurement(ct);
+		} else if (stream_pts_ns == ct->pending.stream_pts_ns ||
+			   wall_time_ns == ct->pending.wall_time_ns) {
+			pthread_mutex_unlock(&ct->mutex);
+			return;
+		}
+	}
+
+	struct clock_sample current = {
+		.stream_pts_ns = stream_pts_ns,
+		.wall_time_ns = wall_time_ns,
+	};
+	if (!ct->pending_set) {
+		ct->pending = current;
+		ct->pending_bucket_start_ns = wall_time_ns;
+		ct->pending_set = true;
+		pthread_mutex_unlock(&ct->mutex);
+		return;
+	}
+
+	int64_t delivery_gap = wall_time_ns - ct->pending.wall_time_ns;
+	int64_t bucket_age = wall_time_ns - ct->pending_bucket_start_ns;
+	if (delivery_gap >= DELIVERY_CLUSTER_GAP_NS ||
+	    bucket_age >= SAMPLE_BUCKET_NS) {
+		/* pending is the final frame from the preceding delivery cluster,
+		 * which is the unbiased endpoint we want in the regression. */
+		commit_sample(ct, &ct->pending);
+		ct->pending = current;
+		ct->pending_bucket_start_ns = wall_time_ns;
+	} else {
+		/* Coalesce a tightly delivered group to its final media PTS. */
+		ct->pending = current;
+	}
 
 	pthread_mutex_unlock(&ct->mutex);
 }
@@ -238,11 +277,10 @@ int64_t clock_tracker_adjust_timestamp(struct clock_tracker *ct,
 	else if (rate > 1.10)
 		rate = 1.10;
 
-	long double adjusted =
-		(long double)ct->anchor_wall_ns +
-		((long double)stream_pts_ns -
-		 (long double)ct->anchor_stream_ns) /
-			(long double)rate;
+	long double adjusted = (long double)ct->anchor_wall_ns +
+			       ((long double)stream_pts_ns -
+				(long double)ct->anchor_stream_ns) /
+				       (long double)rate;
 	int64_t result;
 	if (adjusted > (long double)INT64_MAX)
 		result = INT64_MAX;

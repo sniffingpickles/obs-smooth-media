@@ -776,7 +776,7 @@ def main():
     scenario5()
     scenario6()
     print("\n" + "=" * 78)
-    print("DONE — see the chat report for ranked failure modes & fixes.")
+    print("DONE — historical recovery scenarios completed.")
     print("=" * 78)
 
 

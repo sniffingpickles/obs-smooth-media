@@ -1,7 +1,7 @@
 #pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <util/threading.h>
 
 #ifdef _MSC_VER
@@ -10,12 +10,12 @@
 #pragma warning(disable : 4204)
 #endif
 
-#include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
-#include <libswscale/swscale.h>
-#include <libswresample/swresample.h>
-#include <libavutil/imgutils.h>
+#include <libavformat/avformat.h>
 #include <libavutil/error.h>
+#include <libavutil/imgutils.h>
+#include <libswresample/swresample.h>
+#include <libswscale/swscale.h>
 
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -40,10 +40,10 @@ struct decoded_video_frame {
 	int width;
 	int height;
 	int64_t pts_ns;
-	int format;         /* AVPixelFormat */
-	int colorspace;     /* AVColorSpace */
-	int color_range;    /* AVColorRange */
-	int color_trc;      /* AVColorTransferCharacteristic */
+	int format;      /* AVPixelFormat */
+	int colorspace;  /* AVColorSpace */
+	int color_range; /* AVColorRange */
+	int color_trc;   /* AVColorTransferCharacteristic */
 	int color_primaries;
 	bool keyframe;
 	uint16_t max_luminance;
@@ -52,15 +52,17 @@ struct decoded_video_frame {
 struct decoded_audio_frame {
 	uint8_t *data[8];
 	size_t data_size[8];
-	uint32_t frames;        /* number of samples */
+	uint32_t frames; /* number of samples */
 	uint32_t sample_rate;
 	uint32_t channels;
 	int64_t pts_ns;
-	int format;             /* AVSampleFormat */
+	int format; /* AVSampleFormat */
 };
 
-typedef void (*stream_video_cb)(void *opaque, struct decoded_video_frame *frame);
-typedef void (*stream_audio_cb)(void *opaque, struct decoded_audio_frame *frame);
+typedef void (*stream_video_cb)(void *opaque,
+				struct decoded_video_frame *frame);
+typedef void (*stream_audio_cb)(void *opaque,
+				struct decoded_audio_frame *frame);
 typedef void (*stream_stop_cb)(void *opaque);
 
 struct stream_decoder_info {
@@ -98,15 +100,16 @@ struct stream_decode_ctx {
 	AVStream *stream;
 	AVCodecContext *decoder;
 	const AVCodec *codec;
-	AVFrame *frame;       /* receives decoded frames (may be GPU memory) */
-	AVFrame *sw_frame;    /* hw mode: download target for GPU frames */
-	AVBufferRef *hw_ctx;  /* hw device context (NULL in software mode) */
+	AVFrame *frame;      /* receives decoded frames (may be GPU memory) */
+	AVFrame *sw_frame;   /* hw mode: download target for GPU frames */
+	AVBufferRef *hw_ctx; /* hw device context (NULL in software mode) */
 	enum AVPixelFormat hw_pix_fmt; /* the GPU surface format to negotiate */
 	int64_t last_pts_ns;
 	int64_t next_pts_ns;
 	bool got_first_keyframe;
+	bool corrupt_video_logged;
 	bool audio;
-	bool hw;              /* true once hardware decoding is active */
+	bool hw; /* true once hardware decoding is active */
 	uint16_t max_luminance;
 	int64_t last_error_log_us;
 };
@@ -134,12 +137,13 @@ struct stream_decoder {
 	/* Threading */
 	volatile bool running;
 	volatile bool kill;
-	volatile bool *abort_flag;  /* external cancel (e.g. source teardown) */
+	volatile bool *abort_flag; /* external cancel (e.g. source teardown) */
 	int64_t interrupt_deadline_us; /* media-thread open/probe deadline */
 };
 
 /* Create and open the stream. Returns NULL on failure. */
-struct stream_decoder *stream_decoder_create(const struct stream_decoder_info *info);
+struct stream_decoder *
+stream_decoder_create(const struct stream_decoder_info *info);
 
 /* Destroy and free all resources */
 void stream_decoder_destroy(struct stream_decoder *sd);

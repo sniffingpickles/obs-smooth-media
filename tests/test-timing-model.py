@@ -22,7 +22,7 @@ AUDIO_SR = 48_000
 AUDIO_DUR = AUDIO_FRAMES * NS // AUDIO_SR
 TICK = NS // 60
 MIN_TARGET = 80 * MS
-TARGET_CAP = 600 * MS
+TARGET_CAP = 750 * MS
 HARD_CAP = 1_200 * MS
 MARGIN = 250 * MS
 SETTLE = 8 * NS
@@ -34,25 +34,52 @@ class Clock:
             maxlen=2048
         )
         self.rate = 1.0
+        self.pending: tuple[int, int] | None = None
+        self.pending_start = 0
+        self.last_filter_wall = 0
 
-    def record(self, pts: int, wall: int) -> None:
-        if self.samples:
-            last_pts, last_wall = self.samples[-1]
-            if pts < last_pts or wall < last_wall:
-                self.samples.clear()
-                self.rate = 1.0
-            elif pts == last_pts or wall == last_wall:
-                return
-        self.samples.append((pts, wall))
+    def commit(self, sample: tuple[int, int]) -> None:
+        pts, wall = sample
+        self.samples.append(sample)
         oldest = None
-        for sample in reversed(self.samples):
-            if wall - sample[1] > 5 * NS:
+        for candidate in reversed(self.samples):
+            if wall - candidate[1] > 5 * NS:
                 break
-            oldest = sample
+            oldest = candidate
         if oldest and wall - oldest[1] > 100 * MS:
             measured = (pts - oldest[0]) / (wall - oldest[1])
             measured = max(0.90, min(1.10, measured))
-            self.rate += 0.008 * (measured - self.rate)
+            elapsed = (
+                250 * MS
+                if self.last_filter_wall == 0
+                else wall - self.last_filter_wall
+            )
+            alpha = 1.0 - math.exp(-elapsed / (2.7 * NS))
+            self.rate += alpha * (measured - self.rate)
+            self.last_filter_wall = wall
+
+    def record(self, pts: int, wall: int) -> None:
+        if self.pending:
+            last_pts, last_wall = self.pending
+            if pts < last_pts or wall < last_wall:
+                self.samples.clear()
+                self.rate = 1.0
+                self.pending = None
+                self.pending_start = 0
+                self.last_filter_wall = 0
+            elif pts == last_pts or wall == last_wall:
+                return
+        current = (pts, wall)
+        if self.pending is None:
+            self.pending = current
+            self.pending_start = wall
+            return
+        if wall - self.pending[1] >= 100 * MS or wall - self.pending_start >= 250 * MS:
+            self.commit(self.pending)
+            self.pending = current
+            self.pending_start = wall
+        else:
+            self.pending = current
 
 
 class Buffer:
@@ -62,6 +89,8 @@ class Buffer:
         self.target = MIN_TARGET
         self.maximum = MIN_TARGET + MARGIN
         self.jitter = 0
+        self.delivery_gap = 0
+        self.last_gap_decay = 0
         self.primed = False
         self.prev_arrival: int | None = None
         self.prev_pts: int | None = None
@@ -70,14 +99,28 @@ class Buffer:
 
     def push(self, pts: int, arrival: int) -> None:
         if self.prev_arrival is not None and self.prev_pts is not None:
+            arrival_delta = arrival - self.prev_arrival
             delta = abs(
-                (arrival - self.prev_arrival) - (pts - self.prev_pts)
+                arrival_delta - (pts - self.prev_pts)
             )
             self.jitter += (delta - self.jitter) // 16
+            if self.last_gap_decay and arrival > self.last_gap_decay:
+                self.delivery_gap = max(
+                    0,
+                    self.delivery_gap
+                    - (arrival - self.last_gap_decay) // 20,
+                )
+            self.last_gap_decay = arrival
+            self.delivery_gap = max(self.delivery_gap, arrival_delta)
         self.prev_arrival = arrival
         self.prev_pts = pts
-        self.target = max(
-            MIN_TARGET, min(TARGET_CAP, MIN_TARGET + 3 * self.jitter)
+        self.target = min(
+            TARGET_CAP,
+            max(
+                MIN_TARGET,
+                MIN_TARGET + 3 * self.jitter,
+                self.delivery_gap + 40 * MS,
+            ),
         )
         self.maximum = min(HARD_CAP, self.target + MARGIN)
 
@@ -163,8 +206,7 @@ def simulate(
     playback_ratio = 1.0
     sr_ratio = 1.0
     sr_slow = 1.0
-    declared_sr = AUDIO_SR
-    last_sr_change = 0
+    output_sample_rates: set[int] = set()
     initial_trimmed = False
     underruns = 0
     starved = False
@@ -210,13 +252,18 @@ def simulate(
 
         measured = max(0.90, min(1.10, clock.rate))
         level_error = max(
-            -0.5, min(0.0, (buffer.level - buffer.target) / buffer.target)
-        )
-        pop_interval = int(
-            AUDIO_DUR / measured * (1.0 - 0.15 * level_error)
+            -0.5, min(0.5, (buffer.level - buffer.target) / buffer.target)
         )
         sr_slow += 0.0015 * (measured - sr_slow)
-        desired = 1.0 if wall < SETTLE else max(0.95, min(1.05, sr_slow))
+        base_ratio = 1.0 if wall < SETTLE else sr_slow
+        occupancy_gain = (
+            0.15 if level_error < 0 else (0.0 if wall < SETTLE else 0.08)
+        )
+        desired = max(
+            0.90,
+            min(1.10, base_ratio * (1.0 + occupancy_gain * level_error)),
+        )
+        pop_interval = int(AUDIO_DUR / sr_ratio)
 
         for _ in range(8):
             should_pop = (
@@ -242,21 +289,22 @@ def simulate(
                 if wall - last_pop > 2 * pop_interval:
                     last_pop = wall - pop_interval
 
-            sr_ratio += max(-0.0005, min(0.0005, desired - sr_ratio))
-            exact = AUDIO_SR * sr_ratio
-            if (
-                abs(exact - declared_sr) >= 40
-                and wall - last_sr_change >= 2 * NS
-                and buffer.jitter < 50 * MS
-            ):
-                declared_sr = round(exact)
-                last_sr_change = wall
-            playback_ratio = declared_sr / AUDIO_SR
+            slew = (
+                0.0015
+                if wall < SETTLE
+                and level_error < -0.25
+                and desired < sr_ratio
+                else 0.0005
+            )
+            sr_ratio += max(-slew, min(slew, desired - sr_ratio))
+            output_frames = max(1, round(AUDIO_FRAMES / sr_ratio))
+            output_sample_rates.add(AUDIO_SR)
+            playback_ratio = sr_ratio
 
             if not audio_outputs:
                 audio_next = wall
             else:
-                audio_next += AUDIO_FRAMES * NS // declared_sr
+                audio_next += output_frames * NS // AUDIO_SR
                 error = wall - audio_next
                 if error < 0:
                     audio_next += int(error / 10)
@@ -273,6 +321,7 @@ def simulate(
     audio_ts = [ts for _, ts in audio_outputs]
     video_ts = [ts for _, ts in video_outputs]
     assert all(a < b for a, b in zip(audio_ts, audio_ts[1:])), "audio timestamp reversal"
+    assert output_sample_rates == {AUDIO_SR}, "output sample rate changed"
     assert all(a <= b for a, b in zip(video_ts, video_ts[1:])), "video timestamp reversal"
     stable_video_gaps = [
         current[1] - previous[1]

@@ -1,36 +1,28 @@
 #include "smooth-media-source.h"
 
-#include <util/dstr.h>
-#include <util/platform.h>
 #include <libavutil/pixdesc.h>
 #include <limits.h>
-#include <math.h>
 #include <stdio.h>
+#include <util/dstr.h>
+#include <util/platform.h>
 
 #define PLUGIN_LOG_PREFIX "[Smooth Media Source '%s']: "
 #define SM_LOG(level, format, ...) \
 	blog(level, PLUGIN_LOG_PREFIX format, \
 	     obs_source_get_name(s->source), ##__VA_ARGS__)
 
-/* Hardcoded tuning constants — these don't need user-facing sliders.
- * They've been empirically validated across RTMP/SRT streams. */
-#define NETWORK_BUFFER_MB   2
-#define JITTER_BUFFER_MS    80
-#define SR_WARMUP_NS        (8000000000LL) /* 8s: hold rate at 1.0x until the post-connect burst ages out of the clock window */
-#define SR_SLEW_PER_POP     0.0005         /* max declared-rate change per popped frame (~2.3%/s) — no audible pitch steps */
-#define SR_SLOW_ALPHA       0.0015         /* per-tick EMA on the drift estimate (~11s TC) — rejects jitter-induced rate wobble so the declared rate stays put */
-#define SR_UPDATE_DEADBAND_HZ 40.0         /* only re-declare sample rate after it drifts this far — keeps OBS's resampler from resetting (which clicks) */
-#define SR_MIN_HOLD_NS      (2000000000LL) /* and never re-declare more often than this */
-/* Ignore delivery-rate measurement for this long after a (re)connect or a
- * stall. The server's catch-up flush (a moderate, multi-second burst that
- * slips past the instantaneous-burst filter) would otherwise pollute the rate
- * window — biasing the declared rate (clicks + pitch glide) and over-draining
- * the buffer. Matches the warmup so we pace at 1.0x and don't measure until
- * the catch-up has fully cleared. The buffer-level trim protects against
- * underrun during this window. */
-#define CLOCK_SETTLE_NS     SR_WARMUP_NS
-#define STALL_GAP_NS        (500000000LL)  /* an audio arrival gap larger than this is treated as a stall; rate measurement re-settles afterward so the stall+catch-up burst can't corrupt it. Kept well above normal jitter (which can momentarily exceed 250ms) so it only trips on genuine freezes. */
-#define SR_STABLE_JITTER_NS (50000000LL)   /* only change the declared sample rate while jitter is below this (link calm) — prevents chasing the rate during a disruption */
+/* Controller constants validated by the timing and network test suites. */
+#define NETWORK_BUFFER_MB           2
+#define JITTER_BUFFER_MS            80
+#define SR_WARMUP_NS                (8000000000LL)
+#define SR_SLEW_PER_POP             0.0005
+#define SR_EMERGENCY_SLEW_PER_POP   0.0015
+#define SR_SLOW_ALPHA               0.0015
+#define PLAYBACK_RATIO_MIN          0.90
+#define PLAYBACK_RATIO_MAX          1.10
+#define CLOCK_SETTLE_NS             SR_WARMUP_NS
+/* MPEG-TS audio can arrive in ordinary ~600ms batches. */
+#define STALL_GAP_NS                (2000000000LL)
 
 /* Forward declarations */
 static void smooth_media_update(void *data, obs_data_t *settings);
@@ -67,34 +59,32 @@ static enum obs_media_state get_media_state(struct smooth_media_source *s)
 	return state;
 }
 
-/* ──────────────────────────────────────────────
- *  Format conversion helpers (AVFormat → OBS)
- * ────────────────────────────────────────────── */
+/* Format conversion helpers */
 
 static inline enum video_format av_to_obs_video_format(int f)
 {
 	switch (f) {
-	case AV_PIX_FMT_YUV420P:   return VIDEO_FORMAT_I420;
-	case AV_PIX_FMT_YUVJ420P:  return VIDEO_FORMAT_I420;
-	case AV_PIX_FMT_YUYV422:   return VIDEO_FORMAT_YUY2;
-	case AV_PIX_FMT_YUV422P:   return VIDEO_FORMAT_I422;
-	case AV_PIX_FMT_YUVJ422P:  return VIDEO_FORMAT_I422;
-	case AV_PIX_FMT_YUV444P:   return VIDEO_FORMAT_I444;
-	case AV_PIX_FMT_YUVJ444P:  return VIDEO_FORMAT_I444;
-	case AV_PIX_FMT_UYVY422:   return VIDEO_FORMAT_UYVY;
-	case AV_PIX_FMT_YVYU422:   return VIDEO_FORMAT_YVYU;
-	case AV_PIX_FMT_NV12:      return VIDEO_FORMAT_NV12;
-	case AV_PIX_FMT_RGBA:      return VIDEO_FORMAT_RGBA;
-	case AV_PIX_FMT_BGRA:      return VIDEO_FORMAT_BGRA;
-	case AV_PIX_FMT_YUVA420P:  return VIDEO_FORMAT_I40A;
+	case AV_PIX_FMT_YUV420P: return VIDEO_FORMAT_I420;
+	case AV_PIX_FMT_YUVJ420P: return VIDEO_FORMAT_I420;
+	case AV_PIX_FMT_YUYV422: return VIDEO_FORMAT_YUY2;
+	case AV_PIX_FMT_YUV422P: return VIDEO_FORMAT_I422;
+	case AV_PIX_FMT_YUVJ422P: return VIDEO_FORMAT_I422;
+	case AV_PIX_FMT_YUV444P: return VIDEO_FORMAT_I444;
+	case AV_PIX_FMT_YUVJ444P: return VIDEO_FORMAT_I444;
+	case AV_PIX_FMT_UYVY422: return VIDEO_FORMAT_UYVY;
+	case AV_PIX_FMT_YVYU422: return VIDEO_FORMAT_YVYU;
+	case AV_PIX_FMT_NV12: return VIDEO_FORMAT_NV12;
+	case AV_PIX_FMT_RGBA: return VIDEO_FORMAT_RGBA;
+	case AV_PIX_FMT_BGRA: return VIDEO_FORMAT_BGRA;
+	case AV_PIX_FMT_YUVA420P: return VIDEO_FORMAT_I40A;
 	case AV_PIX_FMT_YUV420P10LE: return VIDEO_FORMAT_I010;
 	case AV_PIX_FMT_YUV422P10LE: return VIDEO_FORMAT_I210;
 	case AV_PIX_FMT_YUV444P10LE: return VIDEO_FORMAT_I412;
-	case AV_PIX_FMT_YUVA422P:  return VIDEO_FORMAT_I42A;
-	case AV_PIX_FMT_YUVA444P:  return VIDEO_FORMAT_YUVA;
-	case AV_PIX_FMT_BGR0:      return VIDEO_FORMAT_BGRX;
-	case AV_PIX_FMT_P010LE:    return VIDEO_FORMAT_P010;
-	case AV_PIX_FMT_GRAY8:     return VIDEO_FORMAT_Y800;
+	case AV_PIX_FMT_YUVA422P: return VIDEO_FORMAT_I42A;
+	case AV_PIX_FMT_YUVA444P: return VIDEO_FORMAT_YUVA;
+	case AV_PIX_FMT_BGR0: return VIDEO_FORMAT_BGRX;
+	case AV_PIX_FMT_P010LE: return VIDEO_FORMAT_P010;
+	case AV_PIX_FMT_GRAY8: return VIDEO_FORMAT_Y800;
 	default: return VIDEO_FORMAT_NONE;
 	}
 }
@@ -102,15 +92,30 @@ static inline enum video_format av_to_obs_video_format(int f)
 static inline enum audio_format av_to_obs_audio_format(int f)
 {
 	switch (f) {
-	case AV_SAMPLE_FMT_U8:    return AUDIO_FORMAT_U8BIT;
-	case AV_SAMPLE_FMT_S16:   return AUDIO_FORMAT_16BIT;
-	case AV_SAMPLE_FMT_S32:   return AUDIO_FORMAT_32BIT;
-	case AV_SAMPLE_FMT_FLT:   return AUDIO_FORMAT_FLOAT;
-	case AV_SAMPLE_FMT_U8P:   return AUDIO_FORMAT_U8BIT_PLANAR;
-	case AV_SAMPLE_FMT_S16P:  return AUDIO_FORMAT_16BIT_PLANAR;
-	case AV_SAMPLE_FMT_S32P:  return AUDIO_FORMAT_32BIT_PLANAR;
-	case AV_SAMPLE_FMT_FLTP:  return AUDIO_FORMAT_FLOAT_PLANAR;
+	case AV_SAMPLE_FMT_U8: return AUDIO_FORMAT_U8BIT;
+	case AV_SAMPLE_FMT_S16: return AUDIO_FORMAT_16BIT;
+	case AV_SAMPLE_FMT_S32: return AUDIO_FORMAT_32BIT;
+	case AV_SAMPLE_FMT_FLT: return AUDIO_FORMAT_FLOAT;
+	case AV_SAMPLE_FMT_U8P: return AUDIO_FORMAT_U8BIT_PLANAR;
+	case AV_SAMPLE_FMT_S16P: return AUDIO_FORMAT_16BIT_PLANAR;
+	case AV_SAMPLE_FMT_S32P: return AUDIO_FORMAT_32BIT_PLANAR;
+	case AV_SAMPLE_FMT_FLTP: return AUDIO_FORMAT_FLOAT_PLANAR;
 	default: return AUDIO_FORMAT_UNKNOWN;
+	}
+}
+
+static inline enum AVSampleFormat obs_to_av_audio_format(int f)
+{
+	switch (f) {
+	case AUDIO_FORMAT_U8BIT: return AV_SAMPLE_FMT_U8;
+	case AUDIO_FORMAT_16BIT: return AV_SAMPLE_FMT_S16;
+	case AUDIO_FORMAT_32BIT: return AV_SAMPLE_FMT_S32;
+	case AUDIO_FORMAT_FLOAT: return AV_SAMPLE_FMT_FLT;
+	case AUDIO_FORMAT_U8BIT_PLANAR: return AV_SAMPLE_FMT_U8P;
+	case AUDIO_FORMAT_16BIT_PLANAR: return AV_SAMPLE_FMT_S16P;
+	case AUDIO_FORMAT_32BIT_PLANAR: return AV_SAMPLE_FMT_S32P;
+	case AUDIO_FORMAT_FLOAT_PLANAR: return AV_SAMPLE_FMT_FLTP;
+	default: return AV_SAMPLE_FMT_NONE;
 	}
 }
 
@@ -147,8 +152,7 @@ static inline enum video_colorspace av_to_obs_colorspace(int cs, int trc,
 	case AVCOL_SPC_FCC:
 	case AVCOL_SPC_BT470BG:
 	case AVCOL_SPC_SMPTE170M:
-	case AVCOL_SPC_SMPTE240M:
-		return VIDEO_CS_601;
+	case AVCOL_SPC_SMPTE240M: return VIDEO_CS_601;
 	case AVCOL_SPC_BT2020_NCL:
 		return (trc == AVCOL_TRC_ARIB_STD_B67) ? VIDEO_CS_2100_HLG
 						       : VIDEO_CS_2100_PQ;
@@ -161,9 +165,7 @@ static inline enum video_colorspace av_to_obs_colorspace(int cs, int trc,
 	}
 }
 
-/* ──────────────────────────────────────────────
- *  Decoder callbacks — receive decoded frames
- * ────────────────────────────────────────────── */
+/* Decoder callbacks */
 
 static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 {
@@ -214,8 +216,7 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	if (!s->first_video) {
 		s->first_video = true;
 		s->first_video_pts = vf->pts_ns;
-		SM_LOG(LOG_INFO,
-		       "First video frame: %dx%d fmt=%d pts=%lldms",
+		SM_LOG(LOG_INFO, "First video frame: %dx%d fmt=%d pts=%lldms",
 		       vf->width, vf->height, vf->format,
 		       (long long)(vf->pts_ns / 1000000));
 	}
@@ -252,8 +253,7 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	} else {
 		int64_t prev_video_pts = s->prev_video_pts;
 		uint64_t pts_delta_u =
-			(uint64_t)vf->pts_ns -
-			(uint64_t)prev_video_pts;
+			(uint64_t)vf->pts_ns - (uint64_t)prev_video_pts;
 		s->prev_video_pts = vf->pts_ns;
 
 		if (vf->pts_ns > prev_video_pts &&
@@ -263,19 +263,19 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 			 * 0.98x stream's 16.67 ms PTS step is about 17.0 ms in
 			 * realtime; using the raw delta made video drift away
 			 * from audio by tens of milliseconds per minute. */
-			/* Use the same playback-rate ratio currently declared for
+			/* Use the same playback-rate ratio currently applied to
 			 * audio. Following the faster raw clock estimate here while
-			 * audio deliberately slews its declared rate caused a
+			 * audio deliberately slews its speed caused a
 			 * transition-period lip-sync error. */
 			pthread_mutex_lock(&s->controller_mutex);
 			double rate = s->playback_ratio;
 			pthread_mutex_unlock(&s->controller_mutex);
 			if (rate != rate)
 				rate = 1.0;
-			else if (rate < 0.95)
-				rate = 0.95;
-			else if (rate > 1.05)
-				rate = 1.05;
+			else if (rate < PLAYBACK_RATIO_MIN)
+				rate = PLAYBACK_RATIO_MIN;
+			else if (rate > PLAYBACK_RATIO_MAX)
+				rate = PLAYBACK_RATIO_MAX;
 			s->video_next_ts = saturating_add_i64(
 				s->video_next_ts,
 				(int64_t)((double)pts_delta / rate));
@@ -304,8 +304,7 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 		out_ts = s->video_next_ts;
 	}
 	pthread_mutex_lock(&s->timing_mutex);
-	if (s->video_frames_out > 0 &&
-	    out_ts <= s->video_out_ts)
+	if (s->video_frames_out > 0 && out_ts <= s->video_out_ts)
 		out_ts = s->video_out_ts + 1;
 	s->video_next_ts = out_ts;
 	s->video_out_ts = out_ts;
@@ -348,23 +347,15 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	case AVCOL_TRC_GAMMA28:
 	case AVCOL_TRC_SMPTE170M:
 	case AVCOL_TRC_SMPTE240M:
-	case AVCOL_TRC_IEC61966_2_1:
-		frame.trc = VIDEO_TRC_SRGB;
-		break;
-	case AVCOL_TRC_SMPTE2084:
-		frame.trc = VIDEO_TRC_PQ;
-		break;
-	case AVCOL_TRC_ARIB_STD_B67:
-		frame.trc = VIDEO_TRC_HLG;
-		break;
-	default:
-		frame.trc = VIDEO_TRC_DEFAULT;
+	case AVCOL_TRC_IEC61966_2_1: frame.trc = VIDEO_TRC_SRGB; break;
+	case AVCOL_TRC_SMPTE2084: frame.trc = VIDEO_TRC_PQ; break;
+	case AVCOL_TRC_ARIB_STD_B67: frame.trc = VIDEO_TRC_HLG; break;
+	default: frame.trc = VIDEO_TRC_DEFAULT;
 	}
 
 	video_format_get_parameters_for_format(
-		space, range, obs_fmt,
-		frame.color_matrix, frame.color_range_min,
-		frame.color_range_max);
+		space, range, obs_fmt, frame.color_matrix,
+		frame.color_range_min, frame.color_range_max);
 
 	obs_source_output_video(s->source, &frame);
 }
@@ -376,35 +367,15 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	if (af->frames == 0 || af->sample_rate == 0)
 		return;
 
-	/* Feed the rate estimator only with steady-state delivery. Two cases
-	 * are excluded because they make the estimate read garbage and the
-	 * sample-rate corrector then chases it (pitch wobble + resampler-reset
-	 * clicks):
-	 *   1. Connect: the SRT server dumps its backlog in a fast burst.
-	 *   2. Stalls: while the stream is frozen, wall time advances but PTS
-	 *      doesn't, so the rate dives toward 0.90; then the catch-up burst
-	 *      swings it back. A single blip otherwise causes ~40s of wobble.
-	 * Detecting an arrival gap re-arms the settle window so the stall AND
-	 * its catch-up burst are skipped; the rate simply holds its last-good
-	 * value through the disruption. */
+	/* The clock tracker coalesces decoded delivery bursts to their final
+	 * media timestamp. Skip only startup and true multi-second stalls;
+	 * ordinary MPEG-TS batching must remain visible to the estimator. */
 	int64_t wall_now = (int64_t)os_gettime_ns();
 
-	/* Track the instantaneous delivery rate (stream time per wall time).
-	 * ~1.0 = steady; >1 = the server is flushing a backlog faster than
-	 * real time (catch-up burst after a disconnect/stall); <1 = slow/
-	 * stalling. Smoothed so normal jitter averages out. */
 	if (s->last_audio_arrival_ns != 0) {
 		int64_t d_arr = wall_now - s->last_audio_arrival_ns;
-		uint64_t d_pts =
-			(uint64_t)af->pts_ns -
-			(uint64_t)s->last_audio_pts_ns;
-		if (d_arr > 0 && af->pts_ns > s->last_audio_pts_ns) {
-			double inst = (double)d_pts / (double)d_arr;
-			if (inst > 3.0)
-				inst = 3.0;
-			s->deliv_ema += 0.1 * (inst - s->deliv_ema);
-		}
 		if (d_arr > STALL_GAP_NS) {
+			clock_tracker_reset(&s->clock);
 			pthread_mutex_lock(&s->controller_mutex);
 			s->clock_skip_until_ns = wall_now + CLOCK_SETTLE_NS;
 			/* Re-arm the trim: once the post-stall catch-up settles,
@@ -418,36 +389,10 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	s->last_audio_arrival_ns = wall_now;
 	s->last_audio_pts_ns = af->pts_ns;
 
-	/* Only feed the rate estimator with steady-state delivery. Two tells of
-	 * a transient (catch-up burst or stall) that must NOT bias the rate:
-	 *   - delivery rate far from realtime (sharp burst/stall), and
-	 *   - the buffer sitting well above target, which means we're refilling
-	 *     after a dropout (a mild ~2% catch-up looks like steady delivery
-	 *     but the buffer is way over target). A true clock offset keeps the
-	 *     buffer AT target, so this only excludes recoveries.
-	 * Holding the rate steady through these prevents over-drain underruns
-	 * and the post-stall sample-rate drift/clicks. */
-	int64_t buf_level = audio_buffer_level_ns(&s->audio_buf);
-	int64_t buf_target = audio_buffer_target_ns(&s->audio_buf);
-	if (buf_level > buf_target + 150000000LL) {
-		if (s->overfill_since_ns == 0)
-			s->overfill_since_ns = wall_now;
-	} else {
-		s->overfill_since_ns = 0;
-	}
-	/* Sustained (not transient) overfill means we're refilling after a
-	 * dropout — a mild catch-up that would otherwise bias the rate. A
-	 * brief jitter spike pushing the buffer up is normal and still counts
-	 * as steady. */
-	bool sustained_overfill =
-		s->overfill_since_ns != 0 &&
-		(wall_now - s->overfill_since_ns) > 2000000000LL;
-	bool steady = s->deliv_ema > 0.85 && s->deliv_ema < 1.15 &&
-		      !sustained_overfill;
 	pthread_mutex_lock(&s->controller_mutex);
 	int64_t clock_skip_until_ns = s->clock_skip_until_ns;
 	pthread_mutex_unlock(&s->controller_mutex);
-	if (wall_now >= clock_skip_until_ns && steady)
+	if (wall_now >= clock_skip_until_ns)
 		clock_tracker_record(&s->clock, af->pts_ns, wall_now);
 
 	/* Push into the jitter buffer instead of outputting directly.
@@ -455,23 +400,18 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	 * which prevents bursty network delivery from causing OBS
 	 * to accumulate audio buffering. */
 	enum audio_format obs_fmt = av_to_obs_audio_format(af->format);
-	enum speaker_layout speakers =
-		channels_to_speakers(af->channels);
-	if (obs_fmt == AUDIO_FORMAT_UNKNOWN ||
-	    speakers == SPEAKERS_UNKNOWN)
+	enum speaker_layout speakers = channels_to_speakers(af->channels);
+	if (obs_fmt == AUDIO_FORMAT_UNKNOWN || speakers == SPEAKERS_UNKNOWN)
 		return;
 
 	bool was_primed = audio_buffer_is_ready(&s->audio_buf);
 
-	if (!audio_buffer_push(&s->audio_buf,
-			       (const uint8_t *const *)af->data,
-			       af->data_size, af->frames,
-			       af->sample_rate, af->channels,
-			       (int)obs_fmt, (int)speakers,
+	if (!audio_buffer_push(&s->audio_buf, (const uint8_t *const *)af->data,
+			       af->data_size, af->frames, af->sample_rate,
+			       af->channels, (int)obs_fmt, (int)speakers,
 			       af->pts_ns, wall_now)) {
 		if (debug_logging_enabled(s))
-			SM_LOG(LOG_WARNING,
-			       "%s",
+			SM_LOG(LOG_WARNING, "%s",
 			       "Rejected invalid or oversized decoded audio frame");
 		return;
 	}
@@ -481,6 +421,15 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	 * consumer loop that can never produce audio. */
 	if (!os_atomic_load_bool(&s->first_audio)) {
 		s->first_audio_pts = af->pts_ns;
+		/* Network open/probing can consume much of the nominal warmup
+		 * before any media exists. Anchor controller settling to the first
+		 * usable audio frame so startup backlog is never mistaken for a
+		 * steady-state catch-up opportunity. */
+		pthread_mutex_lock(&s->controller_mutex);
+		s->stream_start_time = wall_now;
+		s->clock_skip_until_ns = wall_now + CLOCK_SETTLE_NS;
+		s->did_initial_trim = false;
+		pthread_mutex_unlock(&s->controller_mutex);
 		os_atomic_set_bool(&s->first_audio, true);
 		SM_LOG(LOG_INFO,
 		       "First audio frame: %uHz %uch %u samples pts=%lldms",
@@ -489,9 +438,9 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	}
 
 	if (!was_primed && audio_buffer_is_ready(&s->audio_buf)) {
-		SM_LOG(LOG_INFO,
-		       "Jitter buffer primed (%lldms buffered)",
-		       (long long)(audio_buffer_level_ns(&s->audio_buf) / 1000000));
+		SM_LOG(LOG_INFO, "Jitter buffer primed (%lldms buffered)",
+		       (long long)(audio_buffer_level_ns(&s->audio_buf) /
+				   1000000));
 	}
 
 	/* Log if the buffer had to drop frames (overflow).
@@ -504,8 +453,7 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 			stats.frames_dropped - s->last_drop_count;
 		s->last_drop_count = stats.frames_dropped;
 
-		if (wall_now - s->last_overflow_log_time >=
-		    1000000000LL) {
+		if (wall_now - s->last_overflow_log_time >= 1000000000LL) {
 			SM_LOG(LOG_WARNING,
 			       "Audio buffer overflow: dropped %llu frame(s) "
 			       "(total dropped: %llu, buffered: %lldms)",
@@ -518,10 +466,7 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 	}
 }
 
-static void on_stream_stopped(void *opaque)
-{
-	(void)opaque;
-}
+static void on_stream_stopped(void *opaque) { (void)opaque; }
 
 /* FFmpeg's av_strerror can't translate Windows socket (WSA) error codes,
  * so a failed network open just prints "Error number -10049 occurred".
@@ -543,25 +488,18 @@ static const char *winsock_err_str(int averr)
 	case 10060:
 		return "connection timed out (WSAETIMEDOUT) — host/port "
 		       "unreachable or firewalled";
-	case 10065:
-		return "no route to host (WSAEHOSTUNREACH)";
-	case 10051:
-		return "network unreachable (WSAENETUNREACH)";
-	case 10054:
-		return "connection reset by peer (WSAECONNRESET)";
-	case 10013:
-		return "permission denied (WSAEACCES)";
+	case 10065: return "no route to host (WSAEHOSTUNREACH)";
+	case 10051: return "network unreachable (WSAENETUNREACH)";
+	case 10054: return "connection reset by peer (WSAECONNRESET)";
+	case 10013: return "permission denied (WSAEACCES)";
 	case 11001:
 		return "host not found (WSAHOST_NOT_FOUND) — DNS/hostname "
 		       "problem";
-	default:
-		return NULL;
+	default: return NULL;
 	}
 }
 
-/* ──────────────────────────────────────────────
- *  Media thread — runs the decoder loop
- * ────────────────────────────────────────────── */
+/* Media thread */
 
 static void *media_thread_func(void *data)
 {
@@ -603,13 +541,13 @@ static void *media_thread_func(void *data)
 			char errbuf[160];
 			if (!reason) {
 				if (av_strerror(open_err, errbuf,
-					       sizeof(errbuf)) < 0)
+						sizeof(errbuf)) < 0)
 					snprintf(errbuf, sizeof(errbuf),
 						 "FFmpeg error %d", open_err);
 				reason = errbuf;
 			}
-			SM_LOG(LOG_WARNING,
-			       "Failed to open stream: %s", reason);
+			SM_LOG(LOG_WARNING, "Failed to open stream: %s",
+			       reason);
 		}
 
 		set_media_state(s, OBS_MEDIA_STATE_ENDED);
@@ -669,9 +607,7 @@ static void *media_thread_func(void *data)
 	return NULL;
 }
 
-/* ──────────────────────────────────────────────
- *  Source lifecycle
- * ────────────────────────────────────────────── */
+/* Source lifecycle */
 
 /* Caller must hold lifecycle_mutex. */
 static void stop_media_thread_locked(struct smooth_media_source *s)
@@ -735,20 +671,16 @@ static void start_media_locked(struct smooth_media_source *s)
 	s->last_diag_time = 0;
 	s->underrun_count = 0;
 	s->audio_starved = false;
-	s->sr_change_count = 0;
 	s->last_underrun_log_time = 0;
 	s->stream_start_time = (int64_t)os_gettime_ns();
 	s->clock_skip_until_ns = s->stream_start_time + CLOCK_SETTLE_NS;
 	s->last_audio_arrival_ns = 0;
 	s->last_audio_pts_ns = 0;
-	s->deliv_ema = 1.0;
-	s->overfill_since_ns = 0;
 	s->did_initial_trim = false;
 	s->sr_ratio = 1.0;
 	s->playback_ratio = 1.0;
 	s->sr_slow_rate = 1.0;
-	s->declared_sr = 0;
-	s->last_sr_change_ns = 0;
+	audio_speed_reset(&s->speed_converter);
 	s->last_audio_pop_time = 0;
 	s->audio_frame_dur_ns = 0;
 	s->prev_video_pts = 0;
@@ -762,8 +694,7 @@ static void start_media_locked(struct smooth_media_source *s)
 
 	/* Configure jitter buffer floor; the target/ceiling self-tune from
 	 * here based on measured link jitter and underruns. */
-	audio_buffer_set_minimum(&s->audio_buf,
-				 JITTER_BUFFER_MS * 1000000LL);
+	audio_buffer_set_minimum(&s->audio_buf, JITTER_BUFFER_MS * 1000000LL);
 
 	set_media_state(s, OBS_MEDIA_STATE_OPENING);
 
@@ -780,8 +711,7 @@ static void start_media_locked(struct smooth_media_source *s)
 static bool source_should_run_locked(struct smooth_media_source *s)
 {
 	return s->url && *s->url &&
-	       (!s->close_when_inactive ||
-		obs_source_showing(s->source));
+	       (!s->close_when_inactive || obs_source_showing(s->source));
 }
 
 /* Caller holds lifecycle_mutex. The delay is a timestamp, not a sleeping
@@ -800,7 +730,8 @@ static void service_reconnect_locked(struct smooth_media_source *s,
 		uint32_t attempts = s->reconnect_attempts;
 		pthread_mutex_unlock(&s->state_mutex);
 		if (attempts == 0)
-			SM_LOG(LOG_WARNING, "Stream disconnected. Reconnecting every %d seconds...",
+			SM_LOG(LOG_WARNING,
+			       "Stream disconnected. Reconnecting every %d seconds...",
 			       s->reconnect_delay_sec);
 		return;
 	}
@@ -820,9 +751,7 @@ static void service_reconnect_locked(struct smooth_media_source *s,
 	start_media_locked(s);
 }
 
-/* ──────────────────────────────────────────────
- *  OBS source callbacks
- * ────────────────────────────────────────────── */
+/* OBS source callbacks */
 
 static const char *smooth_media_get_name(void *unused)
 {
@@ -848,94 +777,93 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 	obs_properties_set_flags(props, OBS_PROPERTIES_DEFER_UPDATE);
 
 	/* ── Branded header ── */
-	obs_property_t *hdr = obs_properties_add_text(props, "plugin_info",
-		"<a href='https://IRLhosting.com'>"
-		"IRLhosting Smooth Player</a>"
-		" &nbsp;v" SMOOTH_MEDIA_VERSION,
-		OBS_TEXT_INFO);
+	obs_property_t *hdr =
+		obs_properties_add_text(props, "plugin_info",
+					"<a href='https://IRLhosting.com'>"
+					"IRLhosting Smooth Player</a>"
+					" &nbsp;v" SMOOTH_MEDIA_VERSION,
+					OBS_TEXT_INFO);
 	obs_property_text_set_info_word_wrap(hdr, true);
 
 	/* ── Connection ── */
 	obs_properties_t *conn = obs_properties_create();
 	obs_property_t *p;
 
-	p = obs_properties_add_text(conn, "input",
-				    "Stream URL", OBS_TEXT_DEFAULT);
-	obs_property_set_long_description(p,
-		"Full stream URL including protocol.\n"
-		"Examples:\n"
-		"  srt://host:port?streamid=...\n"
-		"  rtmp://host/app/key\n"
-		"  rist://host:port");
+	p = obs_properties_add_text(conn, "input", "Stream URL",
+				    OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(
+		p, "Full stream URL including protocol.\n"
+		   "Examples:\n"
+		   "  srt://host:port?streamid=...\n"
+		   "  rtmp://host/app/key\n"
+		   "  rist://host:port");
 
-	p = obs_properties_add_text(conn, "input_format",
-				    "Input Format", OBS_TEXT_DEFAULT);
-	obs_property_set_long_description(p,
-		"Force a specific container format (e.g. mpegts).\n"
-		"Leave blank for auto-detection.");
+	p = obs_properties_add_text(conn, "input_format", "Input Format",
+				    OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(
+		p, "Force a specific container format (e.g. mpegts).\n"
+		   "Leave blank for auto-detection.");
 
 	p = obs_properties_add_int_slider(conn, "reconnect_delay_sec",
 					  "Reconnect Delay", 1, 60, 1);
 	obs_property_int_set_suffix(p, " s");
-	obs_property_set_long_description(p,
+	obs_property_set_long_description(
+		p,
 		"Seconds between reconnection attempts when the stream drops.");
 
-	obs_properties_add_group(props, "grp_connection",
-				 "Connection", OBS_GROUP_NORMAL, conn);
+	obs_properties_add_group(props, "grp_connection", "Connection",
+				 OBS_GROUP_NORMAL, conn);
 
 	/* ── Playback ── */
 	obs_properties_t *play = obs_properties_create();
 
-	p = obs_properties_add_bool(play, "hw_decode",
-				    "Hardware Decoding");
-	obs_property_set_long_description(p,
-		"Use GPU-accelerated decoding (NVDEC, QSV, VAAPI).\n"
-		"Reduces CPU load but may not support all codecs.");
+	p = obs_properties_add_bool(play, "hw_decode", "Hardware Decoding");
+	obs_property_set_long_description(
+		p, "Use GPU-accelerated decoding (NVDEC, QSV, VAAPI).\n"
+		   "Reduces CPU load but may not support all codecs.");
 
-	p = obs_properties_add_bool(play, "sync_pts",
-				    "Sync A/V via PTS");
-	obs_property_set_long_description(p,
-		"Use presentation timestamps for audio-video sync.\n"
-		"May help streams with inconsistent frame timing.");
+	p = obs_properties_add_bool(play, "sync_pts", "Sync A/V via PTS");
+	obs_property_set_long_description(
+		p, "Use presentation timestamps for audio-video sync.\n"
+		   "May help streams with inconsistent frame timing.");
 
 	p = obs_properties_add_bool(play, "close_when_inactive",
 				    "Close When Inactive");
-	obs_property_set_long_description(p,
-		"Stop playback and disconnect when the source is\n"
-		"hidden or on another scene. Saves CPU, bandwidth,\n"
-		"and server resources.");
+	obs_property_set_long_description(
+		p, "Stop playback and disconnect when the source is\n"
+		   "hidden or on another scene. Saves CPU, bandwidth,\n"
+		   "and server resources.");
 
 	p = obs_properties_add_bool(play, "disable_video",
 				    "Disable Video Preview (Audio Only)");
-	obs_property_set_long_description(p,
-		"Stop sending video to OBS while keeping the stream\n"
-		"connected and audio playing. Useful when working over\n"
-		"a remote desktop session, where rendering the preview\n"
-		"is slow — toggle this on to test audio without the\n"
-		"video preview. Applies instantly without reconnecting.");
+	obs_property_set_long_description(
+		p, "Stop sending video to OBS while keeping the stream\n"
+		   "connected and audio playing. This can reduce rendering\n"
+		   "overhead during remote administration. Applies instantly\n"
+		   "without reconnecting.");
 
-	obs_properties_add_group(props, "grp_playback",
-				 "Playback", OBS_GROUP_NORMAL, play);
+	obs_properties_add_group(props, "grp_playback", "Playback",
+				 OBS_GROUP_NORMAL, play);
 
 	/* ── Advanced ── */
 	obs_properties_t *adv = obs_properties_create();
 
-	p = obs_properties_add_text(adv, "ffmpeg_options",
-				    "FFmpeg Options", OBS_TEXT_DEFAULT);
-	obs_property_set_long_description(p,
-		"Extra FFmpeg demuxer/decoder options.\n"
-		"Example: analyzeduration=2000000 probesize=5000000");
+	p = obs_properties_add_text(adv, "ffmpeg_options", "FFmpeg Options",
+				    OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(
+		p, "Extra FFmpeg demuxer/decoder options.\n"
+		   "Example: analyzeduration=2000000 probesize=5000000");
 
 	p = obs_properties_add_bool(adv, "debug_logging",
 				    "Verbose Debug Logging");
-	obs_property_set_long_description(p,
-		"Log detailed timing to the OBS log every second, plus\n"
-		"events (underruns, dropped frames, sample-rate changes).\n"
-		"Use this when diagnosing clicks/stutter, then turn it\n"
-		"back off — it's noisy. Applies instantly.");
+	obs_property_set_long_description(
+		p,
+		"Log timing data every second, including underruns,\n"
+		"dropped frames, and playback-speed correction. Enable only\n"
+		"while diagnosing playback. Applies instantly.");
 
-	obs_properties_add_group(props, "grp_advanced",
-				 "Advanced", OBS_GROUP_NORMAL, adv);
+	obs_properties_add_group(props, "grp_advanced", "Advanced",
+				 OBS_GROUP_NORMAL, adv);
 
 	return props;
 }
@@ -988,6 +916,7 @@ static void *smooth_media_create(obs_data_t *settings, obs_source_t *source)
 		bfree(s);
 		return NULL;
 	}
+	audio_speed_init(&s->speed_converter);
 
 	/* Apply settings — this will also start the stream */
 	smooth_media_update(s, settings);
@@ -1001,6 +930,7 @@ static void smooth_media_destroy(void *data)
 	stop_media_thread(s);
 
 	audio_buffer_free(&s->audio_buf);
+	audio_speed_free(&s->speed_converter);
 	clock_tracker_free(&s->clock);
 
 	pthread_mutex_destroy(&s->controller_mutex);
@@ -1036,8 +966,7 @@ static void smooth_media_update(void *data, obs_data_t *settings)
 	char *new_fmt = (fmt && *fmt) ? bstrdup(fmt) : NULL;
 	char *new_opts = (opts && *opts) ? bstrdup(opts) : NULL;
 	bool new_hw = obs_data_get_bool(settings, "hw_decode");
-	if (((url && *url) && !new_url) ||
-	    ((fmt && *fmt) && !new_fmt) ||
+	if (((url && *url) && !new_url) || ((fmt && *fmt) && !new_fmt) ||
 	    ((opts && *opts) && !new_opts)) {
 		SM_LOG(LOG_ERROR, "%s",
 		       "Unable to apply settings: out of memory");
@@ -1073,13 +1002,14 @@ static void smooth_media_update(void *data, obs_data_t *settings)
 	s->hw_decode = new_hw;
 
 	s->sync_pts = obs_data_get_bool(settings, "sync_pts");
-	s->close_when_inactive = obs_data_get_bool(settings, "close_when_inactive");
-	bool disable_video =
-		obs_data_get_bool(settings, "disable_video");
+	s->close_when_inactive =
+		obs_data_get_bool(settings, "close_when_inactive");
+	bool disable_video = obs_data_get_bool(settings, "disable_video");
 	os_atomic_set_bool(&s->disable_video, disable_video);
 	os_atomic_set_bool(&s->debug_logging,
 			   obs_data_get_bool(settings, "debug_logging"));
-	s->reconnect_delay_sec = (int)obs_data_get_int(settings, "reconnect_delay_sec");
+	s->reconnect_delay_sec =
+		(int)obs_data_get_int(settings, "reconnect_delay_sec");
 
 	if (s->reconnect_delay_sec < 1)
 		s->reconnect_delay_sec = 10;
@@ -1096,9 +1026,8 @@ static void smooth_media_update(void *data, obs_data_t *settings)
 	} else if (should_run && !source_is_active(s) &&
 		   !s->media_thread_valid) {
 		start_media_locked(s);
-	} else if (!should_run &&
-		   (source_is_active(s) || s->media_thread_valid ||
-		    s->reconnecting)) {
+	} else if (!should_run && (source_is_active(s) ||
+				   s->media_thread_valid || s->reconnecting)) {
 		stop_media_thread_locked(s);
 	}
 
@@ -1135,8 +1064,7 @@ static void smooth_media_show(void *data)
 {
 	struct smooth_media_source *s = data;
 	pthread_mutex_lock(&s->lifecycle_mutex);
-	if (s->close_when_inactive && s->url && *s->url &&
-	    !source_is_active(s))
+	if (s->close_when_inactive && s->url && *s->url && !source_is_active(s))
 		start_media_locked(s);
 	pthread_mutex_unlock(&s->lifecycle_mutex);
 }
@@ -1170,8 +1098,7 @@ static void smooth_media_tick(void *data, float seconds)
 	 * render fps, typically 60 Hz) pops at most a few frames per
 	 * call, gated by real elapsed time.  This converts bursty input
 	 * into steady output — OBS never sees a burst of audio. */
-	if (source_is_active(s) &&
-	    os_atomic_load_bool(&s->first_audio)) {
+	if (source_is_active(s) && os_atomic_load_bool(&s->first_audio)) {
 		int64_t wall_now = (int64_t)os_gettime_ns();
 		bool debug = debug_logging_enabled(s);
 		pthread_mutex_lock(&s->timing_mutex);
@@ -1194,13 +1121,11 @@ static void smooth_media_tick(void *data, float seconds)
 		 * stale backlog down to target so we start near live with the
 		 * full jitter margin available — otherwise the burst leaves the
 		 * buffer pinned near max (≈300ms) for the whole session. */
-		bool buffer_ready =
-			audio_buffer_is_ready(&s->audio_buf);
+		bool buffer_ready = audio_buffer_is_ready(&s->audio_buf);
 		pthread_mutex_lock(&s->controller_mutex);
-		bool should_trim =
-			!s->did_initial_trim &&
-			wall_now >= s->clock_skip_until_ns &&
-			buffer_ready;
+		bool should_trim = !s->did_initial_trim &&
+				   wall_now >= s->clock_skip_until_ns &&
+				   buffer_ready;
 		if (should_trim)
 			s->did_initial_trim = true;
 		pthread_mutex_unlock(&s->controller_mutex);
@@ -1212,55 +1137,52 @@ static void smooth_media_tick(void *data, float seconds)
 				       "DBG initial trim: %lldms -> %lldms",
 				       (long long)(before / 1000000),
 				       (long long)(audio_buffer_level_ns(
-						&s->audio_buf) / 1000000));
+							   &s->audio_buf) /
+						   1000000));
 		}
 
-		/* ── Closed-loop drain pacing ──
-		 * Pop cadence is paced to the stream's TRUE delivery rate, so
-		 * the buffer neither drains nor fills under sustained drift —
-		 * the open-loop fixed-1.0x cadence used to empty the buffer in
-		 * ~4s on a 0.98x stream, killing all jitter protection. A mild
-		 * proportional term nudges the level back toward the adaptive
-		 * target after disturbances. */
+		/* ── Closed-loop playback pacing ──
+		 * The media-clock estimate supplies the long-term pace. Buffer
+		 * occupancy adds a bounded correction: underfill gently slows
+		 * playback; recovery backlog gently speeds it up. The exact same
+		 * ratio drives pop cadence, audio conversion, and video PTS. */
 		int64_t target = audio_buffer_target_ns(&s->audio_buf);
 		int64_t level = audio_buffer_level_ns(&s->audio_buf);
 		double lvl_err = 0.0;
 		if (target > 0) {
 			lvl_err = (double)(level - target) / (double)target;
-			/* Refill-only: when below target, slow the drain to let
-			 * it rebuild; when above, do NOT speed up (that over-
-			 * drains and can push extra audio into OBS) — the
-			 * drop-oldest ceiling bounds excess latency instead. */
-			if (lvl_err > 0.0)
-				lvl_err = 0.0;
 			if (lvl_err < -0.5)
 				lvl_err = -0.5;
+			if (lvl_err > 0.5)
+				lvl_err = 0.5;
 		}
-		int64_t pop_interval =
-			(int64_t)((double)frame_dur / rate *
-				  (1.0 - 0.15 * lvl_err));
 
-		/* ── Continuous, slew-limited sample-rate match ──
-		 * Declare the stream's actual rate so OBS consumes at the
-		 * delivery pace. No deadzone (small drift is corrected too) and
-		 * no round-to-100 (which caused ~2kHz/4% audible pitch steps);
-		 * the per-pop slew limit keeps changes inaudible. */
-		/* Heavily smooth the drift estimate so jitter-induced wobble in
-		 * the measured rate doesn't keep nudging the declared rate
-		 * (which would reset OBS's resampler and click). Real clock
-		 * drift is slow and constant, so a long time-constant is fine. */
+		/* Smooth the long-term estimate, then combine it with the
+		 * occupancy correction. Underfill gets more authority than
+		 * overfill: avoiding silence is worth a larger tempo change,
+		 * while recovery catch-up should remain subtle. */
 		s->sr_slow_rate += SR_SLOW_ALPHA * (rate - s->sr_slow_rate);
+		pthread_mutex_lock(&s->controller_mutex);
+		int64_t controller_start_time = s->stream_start_time;
+		pthread_mutex_unlock(&s->controller_mutex);
 		bool in_warmup =
-			(wall_now - s->stream_start_time) < SR_WARMUP_NS;
-		double desired_ratio = in_warmup ? 1.0 : s->sr_slow_rate;
-		if (desired_ratio < 0.95)
-			desired_ratio = 0.95;
-		if (desired_ratio > 1.05)
-			desired_ratio = 1.05;
+			(wall_now - controller_start_time) < SR_WARMUP_NS;
+		double base_ratio = in_warmup ? 1.0 : s->sr_slow_rate;
+		double occupancy_gain =
+			lvl_err < 0.0 ? 0.15 : (in_warmup ? 0.0 : 0.08);
+		double desired_ratio =
+			base_ratio * (1.0 + occupancy_gain * lvl_err);
+		if (desired_ratio < PLAYBACK_RATIO_MIN)
+			desired_ratio = PLAYBACK_RATIO_MIN;
+		if (desired_ratio > PLAYBACK_RATIO_MAX)
+			desired_ratio = PLAYBACK_RATIO_MAX;
 		pthread_mutex_lock(&s->controller_mutex);
 		if (s->sr_ratio <= 0.0)
 			s->sr_ratio = 1.0;
+		double pacing_ratio = s->sr_ratio;
 		pthread_mutex_unlock(&s->controller_mutex);
+		int64_t pop_interval =
+			(int64_t)((double)frame_dur / pacing_ratio);
 
 		int pops = 0;
 		/* Cap at 8 so a post-stall backlog can be drained over a tick
@@ -1268,11 +1190,11 @@ static void smooth_media_tick(void *data, float seconds)
 		while (pops < 8) {
 			bool should_pop;
 			if (s->last_audio_pop_time == 0) {
-				should_pop = audio_buffer_is_ready(
-					&s->audio_buf);
+				should_pop =
+					audio_buffer_is_ready(&s->audio_buf);
 			} else {
-				int64_t elapsed = wall_now -
-					s->last_audio_pop_time;
+				int64_t elapsed =
+					wall_now - s->last_audio_pop_time;
 				should_pop = (elapsed >= pop_interval);
 			}
 			if (!should_pop)
@@ -1290,15 +1212,17 @@ static void smooth_media_tick(void *data, float seconds)
 					s->underrun_count++;
 					s->audio_starved = true;
 					if (debug &&
-					    (wall_now - s->last_underrun_log_time)
-						    >= 500000000LL) {
+					    (wall_now -
+					     s->last_underrun_log_time) >=
+						    500000000LL) {
 						SM_LOG(LOG_INFO,
-						       "DBG underrun #%llu (buf empty, tgt now %lldms)",
-						       (unsigned long long)
-							       s->underrun_count,
+						       "DBG underrun #%llu (buf "
+						       "empty, tgt now %lldms)",
+						       (unsigned long long)s
+							       ->underrun_count,
 						       (long long)(audio_buffer_target_ns(
-									&s->audio_buf) /
-								1000000));
+									   &s->audio_buf) /
+								   1000000));
 						s->last_underrun_log_time =
 							wall_now;
 					}
@@ -1309,12 +1233,10 @@ static void smooth_media_tick(void *data, float seconds)
 
 			/* Update frame duration estimate from actual
 			 * popped frame */
-			if (buf_frame->sample_rate > 0 &&
-			    buf_frame->frames > 0)
+			if (buf_frame->sample_rate > 0 && buf_frame->frames > 0)
 				s->audio_frame_dur_ns =
 					(int64_t)buf_frame->frames *
-					1000000000LL /
-					buf_frame->sample_rate;
+					1000000000LL / buf_frame->sample_rate;
 
 			/* Advance pop timer.  First pop anchors to now;
 			 * subsequent pops advance by pop_interval to stay
@@ -1330,63 +1252,49 @@ static void smooth_media_tick(void *data, float seconds)
 						wall_now - pop_interval;
 			}
 
-			/* Slew the declared-rate ratio toward target. */
-			double dr = desired_ratio - s->sr_ratio;
-			if (dr > SR_SLEW_PER_POP)
-				dr = SR_SLEW_PER_POP;
-			if (dr < -SR_SLEW_PER_POP)
-				dr = -SR_SLEW_PER_POP;
 			pthread_mutex_lock(&s->controller_mutex);
+			/* Slew gently in normal operation. If startup reserve has
+			 * fallen below half target, slowing down promptly is safer
+			 * than letting the queue empty and producing silence. */
+			double slew = in_warmup && lvl_err < -0.25 &&
+					      desired_ratio < s->sr_ratio
+				      ? SR_EMERGENCY_SLEW_PER_POP
+				      : SR_SLEW_PER_POP;
+			double dr = desired_ratio - s->sr_ratio;
+			if (dr > slew)
+				dr = slew;
+			if (dr < -slew)
+				dr = -slew;
 			s->sr_ratio += dr;
 			double sr_ratio = s->sr_ratio;
 			pthread_mutex_unlock(&s->controller_mutex);
 
-			/* Declared sample rate is held STABLE via a deadband:
-			 * OBS rebuilds its resampler whenever samples_per_sec
-			 * changes, which clicks. So we only re-declare once the
-			 * ideal rate has drifted >=25Hz from what OBS currently
-			 * has — in steady state it never changes (zero clicks),
-			 * and any change is an inaudible <0.06% step. */
-			double exact = (double)buf_frame->sample_rate *
-				       sr_ratio;
-			if (s->declared_sr == 0) {
-				s->declared_sr = (uint32_t)(exact + 0.5);
-				s->last_sr_change_ns = wall_now;
-			} else if (fabs(exact - (double)s->declared_sr) >=
-					   SR_UPDATE_DEADBAND_HZ &&
-				   (wall_now - s->last_sr_change_ns) >=
-					   SR_MIN_HOLD_NS &&
-				   audio_buffer_jitter_ns(&s->audio_buf) <
-					   SR_STABLE_JITTER_NS) {
-				uint32_t old_sr = s->declared_sr;
-				s->declared_sr = (uint32_t)(exact + 0.5);
-				s->last_sr_change_ns = wall_now;
-				s->sr_change_count++;
-				if (debug)
-					SM_LOG(LOG_INFO,
-					       "DBG sample-rate change #%llu: %u -> %u Hz (slow_rate=%.5f) [resampler reset]",
-					       (unsigned long long)
-						       s->sr_change_count,
-					       old_sr, s->declared_sr,
-					       s->sr_slow_rate);
-			}
-			uint32_t adjusted_sample_rate = s->declared_sr;
+			enum AVSampleFormat av_format =
+				obs_to_av_audio_format(buf_frame->format);
+			struct audio_speed_frame speed_frame = {0};
+			bool speed_converted =
+				av_format != AV_SAMPLE_FMT_NONE &&
+				audio_speed_convert(
+					&s->speed_converter,
+					(const uint8_t *const *)buf_frame->data,
+					buf_frame->frames,
+					(int)buf_frame->sample_rate,
+					(int)buf_frame->channels, av_format,
+					sr_ratio, &speed_frame);
+			uint32_t output_frames = speed_converted
+							 ? speed_frame.frames
+							 : buf_frame->frames;
+			uint32_t output_sample_rate = buf_frame->sample_rate;
 			pthread_mutex_lock(&s->controller_mutex);
-			s->playback_ratio =
-				(double)adjusted_sample_rate /
-				(double)buf_frame->sample_rate;
+			s->playback_ratio = speed_converted ? sr_ratio : 1.0;
 			pthread_mutex_unlock(&s->controller_mutex);
 
 			/* ── Timestamp computation ──
 			 * Timestamp spacing must match the duration OBS will
-			 * actually consume: frames / declared sample rate.
-			 * Advancing by raw stream PTS while declaring a corrected
-			 * sample rate made the timestamp clock and the resampler
-			 * disagree, accumulating A/V drift on slow feeds. */
-			int64_t audio_step =
-				(int64_t)buf_frame->frames *
-				1000000000LL /
-				(int64_t)adjusted_sample_rate;
+			 * actually consume after speed conversion. */
+			int64_t audio_step = (int64_t)output_frames *
+					     1000000000LL /
+					     (int64_t)output_sample_rate;
 			int64_t out_ts;
 			if (s->audio_frames_out == 0) {
 				s->audio_next_ts = wall_now;
@@ -1395,29 +1303,23 @@ static void smooth_media_tick(void *data, float seconds)
 				s->audio_next_ts += audio_step;
 				int64_t drift_error =
 					wall_now - s->audio_next_ts;
-				bool tight_sync =
-					s->sync_pts &&
-					video_frames_snapshot > 0;
+				bool tight_sync = s->sync_pts &&
+						  video_frames_snapshot > 0;
 
 				if (drift_error < 0)
-					s->audio_next_ts +=
-						drift_error / 10;
+					s->audio_next_ts += drift_error / 10;
 				else if (tight_sync ||
 					 drift_error > 100000000LL)
-					s->audio_next_ts +=
-						drift_error / 100;
+					s->audio_next_ts += drift_error / 100;
 				else
-					s->audio_next_ts +=
-						drift_error / 1000;
+					s->audio_next_ts += drift_error / 1000;
 
 				int64_t max_ahead =
-					tight_sync
-						? wall_now
-						: wall_now + 20000000LL;
+					tight_sync ? wall_now
+						   : wall_now + 20000000LL;
 				if (s->audio_next_ts > max_ahead)
 					s->audio_next_ts = max_ahead;
-				if (s->audio_next_ts <
-				    wall_now - 200000000LL)
+				if (s->audio_next_ts < wall_now - 200000000LL)
 					s->audio_next_ts = wall_now;
 				out_ts = s->audio_next_ts;
 			}
@@ -1430,22 +1332,26 @@ static void smooth_media_tick(void *data, float seconds)
 
 			/* ── Output to OBS ── */
 			struct obs_source_audio obs_audio = {0};
-			for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++)
-				obs_audio.data[i] =
-					buf_frame->data_size[i] > 0
-						? buf_frame->data[i]
-						: NULL;
+			for (int i = 0; i < AUDIO_BUF_MAX_PLANES; i++) {
+				if (speed_converted) {
+					obs_audio.data[i] =
+						speed_frame.data_size[i] > 0
+							? speed_frame.data[i]
+							: NULL;
+				} else {
+					obs_audio.data[i] =
+						buf_frame->data_size[i] > 0
+							? buf_frame->data[i]
+							: NULL;
+				}
+			}
 
-			obs_audio.frames = buf_frame->frames;
-			obs_audio.samples_per_sec =
-				adjusted_sample_rate;
-			obs_audio.format =
-				(enum audio_format)buf_frame->format;
+			obs_audio.frames = output_frames;
+			obs_audio.samples_per_sec = output_sample_rate;
+			obs_audio.format = (enum audio_format)buf_frame->format;
 			obs_audio.speakers =
-				(enum speaker_layout)
-					buf_frame->speakers;
-			obs_audio.timestamp =
-				out_ts > 0 ? (uint64_t)out_ts : 0;
+				(enum speaker_layout)buf_frame->speakers;
+			obs_audio.timestamp = out_ts > 0 ? (uint64_t)out_ts : 0;
 
 			/* One-time confirmation of exactly what we hand OBS, so
 			 * "no audio" reports can be triaged: if these look sane
@@ -1453,7 +1359,8 @@ static void smooth_media_tick(void *data, float seconds)
 			 * OBS-side routing (mute / track / monitoring). */
 			if (s->audio_frames_out == 0)
 				SM_LOG(LOG_INFO,
-				       "First audio -> OBS: fmt=%d speakers=%d sr=%u frames=%u ts=%lldms",
+				       "First audio -> OBS: fmt=%d speakers=%d "
+				       "sr=%u frames=%u ts=%lldms",
 				       (int)obs_audio.format,
 				       (int)obs_audio.speakers,
 				       obs_audio.samples_per_sec,
@@ -1467,18 +1374,14 @@ static void smooth_media_tick(void *data, float seconds)
 			/* ── Diagnostic logging ──
 			 * Normal: a compact line every 5 s.
 			 * Debug:  a detailed line every 1 s. */
-			int64_t diag_interval = debug
-							? 1000000000LL
-							: 5000000000LL;
+			int64_t diag_interval =
+				debug ? 1000000000LL : 5000000000LL;
 			if ((wall_now - s->last_diag_time) >= diag_interval) {
 				struct audio_buffer_stats stats;
-				audio_buffer_get_stats(&s->audio_buf,
-						       &stats);
+				audio_buffer_get_stats(&s->audio_buf, &stats);
 				pthread_mutex_lock(&s->timing_mutex);
-				video_frames_snapshot =
-					s->video_frames_out;
-				int64_t video_ts_snapshot =
-					s->video_out_ts;
+				video_frames_snapshot = s->video_frames_out;
+				int64_t video_ts_snapshot = s->video_out_ts;
 				pthread_mutex_unlock(&s->timing_mutex);
 				int64_t av_wall = 0;
 				if (video_frames_snapshot > 0)
@@ -1486,34 +1389,55 @@ static void smooth_media_tick(void *data, float seconds)
 						  video_ts_snapshot;
 				if (debug) {
 					SM_LOG(LOG_INFO,
-					       "DBG rate=%.4f slow=%.4f sr_ratio=%.5f decl_sr=%u "
-					       "buf=%lldms tgt=%lldms jit=%lldms pop_iv=%lldms "
-					       "av=%lldms a=%llu v=%llu drop=%llu under=%llu sr_chg=%llu%s",
+					       "DBG rate=%.4f slow=%.4f "
+					       "speed=%.5f out_sr=%u "
+					       "buf=%lldms tgt=%lldms jit=%lldms "
+					       "gap=%lldms "
+					       "pop_iv=%lldms "
+					       "av=%lldms a=%llu v=%llu drop=%llu "
+					       "under=%llu%s",
 					       rate, s->sr_slow_rate,
-					       s->sr_ratio, adjusted_sample_rate,
-					       (long long)(stats.level_ns / 1000000),
-					       (long long)(stats.target_ns / 1000000),
-					       (long long)(stats.jitter_ns / 1000000),
-					       (long long)(pop_interval / 1000000),
+					       s->sr_ratio, output_sample_rate,
+					       (long long)(stats.level_ns /
+							   1000000),
+					       (long long)(stats.target_ns /
+							   1000000),
+					       (long long)(stats.jitter_ns /
+							   1000000),
+					       (long long)(stats.delivery_gap_ns /
+							   1000000),
+					       (long long)(pop_interval /
+							   1000000),
 					       (long long)(av_wall / 1000000),
-					       (unsigned long long)s->audio_frames_out,
-					       (unsigned long long)video_frames_snapshot,
-					       (unsigned long long)stats.frames_dropped,
-					       (unsigned long long)s->underrun_count,
-					       (unsigned long long)s->sr_change_count,
-					       s->sync_pts ? " [PTS-SYNC]" : "");
+					       (unsigned long long)
+						       s->audio_frames_out,
+					       (unsigned long long)
+						       video_frames_snapshot,
+					       (unsigned long long)
+						       stats.frames_dropped,
+					       (unsigned long long)
+						       s->underrun_count,
+					       s->sync_pts ? " [PTS-SYNC]"
+							   : "");
 				} else {
 					SM_LOG(LOG_INFO,
-					       "DIAG: rate=%.4f adj_sr=%u "
-					       "buf=%lldms tgt=%lldms av_wall=%lldms "
+					       "DIAG: rate=%.4f speed=%.4f sr=%u "
+					       "buf=%lldms tgt=%lldms "
+					       "av_wall=%lldms "
 					       "a_out=%llu v_out=%llu%s",
-					       rate, adjusted_sample_rate,
-					       (long long)(stats.level_ns / 1000000),
-					       (long long)(stats.target_ns / 1000000),
+					       rate, s->sr_ratio,
+					       output_sample_rate,
+					       (long long)(stats.level_ns /
+							   1000000),
+					       (long long)(stats.target_ns /
+							   1000000),
 					       (long long)(av_wall / 1000000),
-					       (unsigned long long)s->audio_frames_out,
-					       (unsigned long long)video_frames_snapshot,
-					       s->sync_pts ? " [PTS-SYNC]" : "");
+					       (unsigned long long)
+						       s->audio_frames_out,
+					       (unsigned long long)
+						       video_frames_snapshot,
+					       s->sync_pts ? " [PTS-SYNC]"
+							   : "");
 				}
 				s->last_diag_time = wall_now;
 			}
@@ -1529,8 +1453,7 @@ static void smooth_media_tick(void *data, float seconds)
 
 	bool notify_started =
 		os_atomic_exchange_bool(&s->notify_started, false);
-	bool notify_ended =
-		os_atomic_exchange_bool(&s->notify_ended, false);
+	bool notify_ended = os_atomic_exchange_bool(&s->notify_ended, false);
 	pthread_mutex_unlock(&s->lifecycle_mutex);
 
 	/* OBS media signals are synchronous. Emit them without our lifecycle
@@ -1591,8 +1514,7 @@ bool smooth_media_get_status_snapshot(struct smooth_media_source *s,
 	pthread_mutex_unlock(&s->timing_mutex);
 
 	if (audio_ts && video_ts)
-		status->av_offset_ms =
-			(audio_ts - video_ts) / 1000000;
+		status->av_offset_ms = (audio_ts - video_ts) / 1000000;
 	pthread_mutex_unlock(&s->lifecycle_mutex);
 	return true;
 }
@@ -1605,29 +1527,27 @@ void smooth_media_status_free(struct smooth_media_status *status)
 	memset(status, 0, sizeof(*status));
 }
 
-/* ──────────────────────────────────────────────
- *  OBS source_info registration struct
- * ────────────────────────────────────────────── */
+/* OBS source registration */
 
 struct obs_source_info smooth_media_source_info = {
-	.id             = "smooth_media_source",
-	.type           = OBS_SOURCE_TYPE_INPUT,
-	.output_flags   = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO |
-			  OBS_SOURCE_DO_NOT_DUPLICATE |
-			  OBS_SOURCE_CONTROLLABLE_MEDIA,
-	.get_name       = smooth_media_get_name,
-	.create         = smooth_media_create,
-	.destroy        = smooth_media_destroy,
-	.get_defaults   = smooth_media_defaults,
+	.id = "smooth_media_source",
+	.type = OBS_SOURCE_TYPE_INPUT,
+	.output_flags = OBS_SOURCE_ASYNC_VIDEO | OBS_SOURCE_AUDIO |
+			OBS_SOURCE_DO_NOT_DUPLICATE |
+			OBS_SOURCE_CONTROLLABLE_MEDIA,
+	.get_name = smooth_media_get_name,
+	.create = smooth_media_create,
+	.destroy = smooth_media_destroy,
+	.get_defaults = smooth_media_defaults,
 	.get_properties = smooth_media_get_properties,
-	.activate       = smooth_media_activate,
-	.deactivate     = smooth_media_deactivate,
-	.show           = smooth_media_show,
-	.hide           = smooth_media_hide,
-	.video_tick     = smooth_media_tick,
-	.update         = smooth_media_update,
-	.icon_type      = OBS_ICON_TYPE_MEDIA,
-	.media_restart  = smooth_media_restart,
-	.media_stop     = smooth_media_stop,
+	.activate = smooth_media_activate,
+	.deactivate = smooth_media_deactivate,
+	.show = smooth_media_show,
+	.hide = smooth_media_hide,
+	.video_tick = smooth_media_tick,
+	.update = smooth_media_update,
+	.icon_type = OBS_ICON_TYPE_MEDIA,
+	.media_restart = smooth_media_restart,
+	.media_stop = smooth_media_stop,
 	.media_get_state = smooth_media_get_state,
 };

@@ -1,16 +1,16 @@
 #include "stream-decoder.h"
 
-#include <obs-module.h>
-#include <util/dstr.h>
+#include <errno.h>
 #include <libavdevice/avdevice.h>
-#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/time.h>
-#include <errno.h>
 #include <limits.h>
+#include <obs-module.h>
 #include <stdlib.h>
 #include <string.h>
+#include <util/dstr.h>
 
 static bool sd_initialized = false;
 static pthread_mutex_t sd_init_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -86,11 +86,11 @@ static enum AVPixelFormat sd_get_hw_format(AVCodecContext *avctx,
 static void try_enable_hw_decode(struct stream_decode_ctx *ctx)
 {
 	for (int i = 0;; i++) {
-		const AVCodecHWConfig *cfg = avcodec_get_hw_config(ctx->codec, i);
+		const AVCodecHWConfig *cfg =
+			avcodec_get_hw_config(ctx->codec, i);
 		if (!cfg)
 			break;
-		if (!(cfg->methods &
-		      AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
+		if (!(cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX))
 			continue;
 
 		AVBufferRef *hw_ctx = NULL;
@@ -127,7 +127,8 @@ static uint16_t get_max_luminance(const AVStream *stream)
 
 	uint32_t max_luminance = 0;
 	for (int i = 0; i < stream->codecpar->nb_coded_side_data; i++) {
-		const AVPacketSideData *sd = &stream->codecpar->coded_side_data[i];
+		const AVPacketSideData *sd =
+			&stream->codecpar->coded_side_data[i];
 		if (!sd->data)
 			continue;
 		if (sd->type == AV_PKT_DATA_MASTERING_DISPLAY_METADATA &&
@@ -137,8 +138,7 @@ static uint16_t get_max_luminance(const AVStream *stream)
 			if (m->has_luminance) {
 				double value = av_q2d(m->max_luminance);
 				if (value > 0.0 && value < 65536.0)
-					max_luminance =
-						(uint32_t)(value + 0.5);
+					max_luminance = (uint32_t)(value + 0.5);
 				else if (value >= 65536.0)
 					max_luminance = UINT16_MAX;
 			}
@@ -180,7 +180,8 @@ static bool init_decoder(struct stream_decode_ctx *ctx, AVFormatContext *fmt,
 	if (!ctx->decoder)
 		return false;
 
-	ret = avcodec_parameters_to_context(ctx->decoder, ctx->stream->codecpar);
+	ret = avcodec_parameters_to_context(ctx->decoder,
+					    ctx->stream->codecpar);
 	if (ret < 0) {
 		avcodec_free_context(&ctx->decoder);
 		return false;
@@ -192,10 +193,9 @@ static bool init_decoder(struct stream_decode_ctx *ctx, AVFormatContext *fmt,
 	 * remains focused on the plugin's own threads and synchronization. */
 	ctx->decoder->thread_count = 1;
 #else
-	if (ctx->decoder->thread_count == 1 &&
-	    id != AV_CODEC_ID_PNG && id != AV_CODEC_ID_TIFF &&
-	    id != AV_CODEC_ID_JPEG2000 && id != AV_CODEC_ID_MPEG4 &&
-	    id != AV_CODEC_ID_WEBP)
+	if (ctx->decoder->thread_count == 1 && id != AV_CODEC_ID_PNG &&
+	    id != AV_CODEC_ID_TIFF && id != AV_CODEC_ID_JPEG2000 &&
+	    id != AV_CODEC_ID_MPEG4 && id != AV_CODEC_ID_WEBP)
 		ctx->decoder->thread_count = 0;
 #endif
 
@@ -205,7 +205,8 @@ static bool init_decoder(struct stream_decode_ctx *ctx, AVFormatContext *fmt,
 		try_enable_hw_decode(ctx);
 		if (!ctx->hw)
 			blog(LOG_WARNING,
-			     "[obs-smooth-media] Hardware video decoding unavailable; using software");
+			     "[obs-smooth-media] Hardware video decoding "
+			     "unavailable; using software");
 	}
 
 	ret = avcodec_open2(ctx->decoder, ctx->codec, NULL);
@@ -213,15 +214,15 @@ static bool init_decoder(struct stream_decode_ctx *ctx, AVFormatContext *fmt,
 		bool retry_software = ctx->hw;
 		if (retry_software)
 			blog(LOG_WARNING,
-			     "[obs-smooth-media] Hardware decoder open failed; retrying in software");
+			     "[obs-smooth-media] Hardware decoder open failed; "
+			     "retrying in software");
 		free_decoder(ctx);
 		if (retry_software)
 			return init_decoder(ctx, fmt, type, false);
 		return false;
 	}
 	if (ctx->hw) {
-		const char *pixel_format =
-			av_get_pix_fmt_name(ctx->hw_pix_fmt);
+		const char *pixel_format = av_get_pix_fmt_name(ctx->hw_pix_fmt);
 		blog(LOG_INFO,
 		     "[obs-smooth-media] Hardware video decoding enabled (pixel format: %s)",
 		     pixel_format ? pixel_format : "unknown");
@@ -253,8 +254,8 @@ static void free_decoder(struct stream_decode_ctx *ctx)
 	memset(ctx, 0, sizeof(*ctx));
 }
 
-struct stream_decoder *stream_decoder_create(
-	const struct stream_decoder_info *info)
+struct stream_decoder *
+stream_decoder_create(const struct stream_decoder_info *info)
 {
 	if (!info || !info->url || !*info->url) {
 		if (info && info->open_result)
@@ -309,8 +310,7 @@ struct stream_decoder *stream_decoder_create(
 		format = av_find_input_format(sd->format_name);
 		if (!format) {
 			if (info->open_result)
-				*info->open_result =
-					AVERROR_DEMUXER_NOT_FOUND;
+				*info->open_result = AVERROR_DEMUXER_NOT_FOUND;
 			stream_decoder_destroy(sd);
 			return NULL;
 		}
@@ -328,8 +328,8 @@ struct stream_decoder *stream_decoder_create(
 	}
 
 	if (sd->ffmpeg_options && *sd->ffmpeg_options) {
-		int parse_ret = av_dict_parse_string(
-			&opts, sd->ffmpeg_options, "=", " ", 0);
+		int parse_ret = av_dict_parse_string(&opts, sd->ffmpeg_options,
+						     "=", " ", 0);
 		if (parse_ret < 0) {
 			if (info->open_result)
 				*info->open_result = parse_ret;
@@ -368,22 +368,23 @@ struct stream_decoder *stream_decoder_create(
 			av_dict_set(&opts, "timeout", "30000000", 0);
 		} else if (strncmp(sd->url, "rist", 4) == 0) {
 			av_dict_set(&opts, "timeout", "30000000", 0);
+			/* FFmpeg hands libRIST an AV_LOG callback backed by the
+			 * protocol context. Rapid receiver teardown/reopen on Windows
+			 * can invoke it after that context is gone. Keep libRIST's
+			 * internal callback silent; transport failures are still
+			 * reported by the read/open paths below. */
+			av_dict_set(&opts, "log_level", "-1", 0);
 		}
 	}
 	sd->fmt_ctx->interrupt_callback.callback = interrupt_callback;
 	sd->fmt_ctx->interrupt_callback.opaque = sd;
 
 	int64_t open_timeout_us = DEFAULT_OPEN_TIMEOUT_US;
-	if (info->open_timeout_ms > 0) {
-		if ((int64_t)info->open_timeout_ms >
-		    INT64_MAX / INT64_C(1000))
-			open_timeout_us = INT64_MAX;
-		else
-			open_timeout_us =
-				(int64_t)info->open_timeout_ms * INT64_C(1000);
-	}
-	sd->interrupt_deadline_us = saturating_add_i64(
-		av_gettime_relative(), open_timeout_us);
+	if (info->open_timeout_ms > 0)
+		open_timeout_us =
+			(int64_t)info->open_timeout_ms * INT64_C(1000);
+	sd->interrupt_deadline_us =
+		saturating_add_i64(av_gettime_relative(), open_timeout_us);
 
 	int ret = avformat_open_input(&sd->fmt_ctx, sd->url, format,
 				      opts ? &opts : NULL);
@@ -492,8 +493,8 @@ static void deliver_video_frame(struct stream_decoder *sd,
 		/* Estimate from the stream's guessed display rate. Decoder
 		 * time_base is not necessarily one frame and the old calculation
 		 * multiplied its numerator twice for non-unit numerators. */
-		AVRational rate = av_guess_frame_rate(
-			sd->fmt_ctx, ctx->stream, f);
+		AVRational rate =
+			av_guess_frame_rate(sd->fmt_ctx, ctx->stream, f);
 		if (rate.num > 0 && rate.den > 0) {
 			duration = av_rescale_q(
 				1, (AVRational){rate.den, rate.num},
@@ -516,8 +517,7 @@ static void deliver_audio_frame(struct stream_decoder *sd,
 		return;
 
 	if (f->nb_samples <= 0 || f->sample_rate <= 0 ||
-	    f->sample_rate > 768000 ||
-	    f->ch_layout.nb_channels <= 0 ||
+	    f->sample_rate > 768000 || f->ch_layout.nb_channels <= 0 ||
 	    f->ch_layout.nb_channels > 8)
 		return;
 
@@ -561,8 +561,8 @@ static void deliver_audio_frame(struct stream_decoder *sd,
 	}
 
 	/* Compute next PTS from sample count */
-	int64_t duration = (int64_t)f->nb_samples * 1000000000LL /
-			   (int64_t)f->sample_rate;
+	int64_t duration =
+		(int64_t)f->nb_samples * 1000000000LL / (int64_t)f->sample_rate;
 
 	ctx->last_pts_ns = af.pts_ns;
 	ctx->next_pts_ns = saturating_add_i64(af.pts_ns, duration);
@@ -582,13 +582,14 @@ static bool receive_frames(struct stream_decoder *sd,
 			if (now - ctx->last_error_log_us >= INT64_C(1000000)) {
 				char error_text[AV_ERROR_MAX_STRING_SIZE];
 				if (av_strerror(ret, error_text,
-					       sizeof(error_text)) < 0)
+						sizeof(error_text)) < 0)
 					snprintf(error_text, sizeof(error_text),
 						 "FFmpeg error %d", ret);
 				blog(LOG_WARNING,
-				     "[obs-smooth-media] %s decoder receive dropped a corrupt frame: %s (%d)",
-				     ctx->audio ? "audio" : "video",
-				     error_text, ret);
+				     "[obs-smooth-media] %s decoder receive dropped a corrupt frame: "
+				     "%s (%d)",
+				     ctx->audio ? "audio" : "video", error_text,
+				     ret);
 				ctx->last_error_log_us = now;
 			}
 			av_frame_unref(ctx->frame);
@@ -618,14 +619,36 @@ static bool receive_frames(struct stream_decoder *sd,
 				av_frame_unref(ctx->frame);
 				continue;
 			}
-			if (av_frame_copy_props(ctx->sw_frame,
-						ctx->frame) < 0) {
+			if (av_frame_copy_props(ctx->sw_frame, ctx->frame) <
+			    0) {
 				av_frame_unref(ctx->sw_frame);
 				av_frame_unref(ctx->frame);
 				continue;
 			}
 			out = ctx->sw_frame;
 		}
+
+		/* A missing HEVC reference is synthesized by FFmpeg and poisons
+		 * predicted frames until the next recovery picture. Those
+		 * frames are marked corrupt and commonly render as gray. Keep
+		 * the last good OBS frame on screen instead. H.264 corruption
+		 * remains eligible for output because its decoder can conceal
+		 * damage from nearby frames. */
+		if (!ctx->audio && ctx->decoder->codec_id == AV_CODEC_ID_HEVC &&
+		    (out->flags & AV_FRAME_FLAG_CORRUPT)) {
+			if (!ctx->corrupt_video_logged) {
+				blog(LOG_WARNING,
+				     "[obs-smooth-media] Holding corrupt HEVC "
+				     "video until a clean recovery frame");
+				ctx->corrupt_video_logged = true;
+			}
+			if (out != ctx->frame)
+				av_frame_unref(out);
+			av_frame_unref(ctx->frame);
+			continue;
+		}
+		if (!ctx->audio)
+			ctx->corrupt_video_logged = false;
 
 		if (ctx->audio) {
 			deliver_audio_frame(sd, ctx, out);
@@ -652,14 +675,13 @@ static bool decode_packet(struct stream_decoder *sd,
 		int64_t now = av_gettime_relative();
 		if (now - ctx->last_error_log_us >= INT64_C(1000000)) {
 			char error_text[AV_ERROR_MAX_STRING_SIZE];
-			if (av_strerror(ret, error_text,
-				       sizeof(error_text)) < 0)
+			if (av_strerror(ret, error_text, sizeof(error_text)) <
+			    0)
 				snprintf(error_text, sizeof(error_text),
 					 "FFmpeg error %d", ret);
 			blog(LOG_WARNING,
 			     "[obs-smooth-media] %s decoder rejected a corrupt packet: %s (%d)",
-			     ctx->audio ? "audio" : "video",
-			     error_text, ret);
+			     ctx->audio ? "audio" : "video", error_text, ret);
 			ctx->last_error_log_us = now;
 		}
 		return ret != AVERROR(ENOMEM);
@@ -702,8 +724,7 @@ bool stream_decoder_read_next(struct stream_decoder *sd)
 				protocol = "RTMP";
 		}
 		/* Never log the URL: live URLs commonly contain credentials. */
-		blog(LOG_WARNING,
-		     "[obs-smooth-media] %s read failed: %s (%d)",
+		blog(LOG_WARNING, "[obs-smooth-media] %s read failed: %s (%d)",
 		     protocol, error_text, ret);
 		if (ret == AVERROR_EOF) {
 			bool ok = true;
