@@ -41,6 +41,10 @@ try {
         "X-GitHub-Api-Version" = "2022-11-28"
         "User-Agent" = "obs-smooth-media-updater"
     }
+    if ($CheckOnly -and
+        -not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN)) {
+        $headers.Authorization = "Bearer $env:GITHUB_TOKEN"
+    }
     $release = Invoke-RestMethod `
         -Uri "https://api.github.com/repos/$Repository/releases/latest" `
         -Headers $headers `

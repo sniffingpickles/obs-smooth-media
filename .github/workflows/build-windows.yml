@@ -239,6 +239,8 @@ jobs:
 
       - name: Test updater
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $obsDir = (Resolve-Path "deps/obs-studio").Path
           $updater = Join-Path $obsDir `
