@@ -162,6 +162,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${AVDEVICE_LIBRARIES}
 )
 
+if(UNIX AND NOT APPLE)
+    target_link_libraries(${PROJECT_NAME} PRIVATE m)
+endif()
+
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE
         /std:c11

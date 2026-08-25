@@ -31,6 +31,10 @@ target_include_directories(core-tests PRIVATE
 
 target_link_libraries(core-tests PRIVATE ${TEST_THREAD_LIBS})
 
+if(UNIX AND NOT APPLE)
+    target_link_libraries(core-tests PRIVATE m)
+endif()
+
 if(WIN32 AND W32_PTHREADS_DLL)
     add_custom_command(TARGET core-tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
