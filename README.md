@@ -14,11 +14,17 @@ currently in beta.
 
 You need 64-bit Windows and OBS Studio 32.2.2.
 
-1. Download the latest Windows zip from
+1. Download the latest Windows installer from
    [Releases](https://github.com/sniffingpickles/obs-smooth-media/releases).
-2. Close OBS.
-3. Extract the zip into `C:\Program Files\obs-studio`.
-4. Open OBS and add a **Smooth Media Source**.
+2. Run the installer. It finds the normal OBS folder automatically.
+3. Open OBS and add a **Smooth Media Source**.
+
+The installer also handles updates and clean uninstall. Use **Check for
+updates** in the Start menu, or run a newer installer over the old one. The
+portable zip is still available for manual installs.
+
+The installer is not code-signed yet, so Windows may show a SmartScreen
+warning. Release downloads include a SHA-256 digest for verification.
 
 ## Use it
 

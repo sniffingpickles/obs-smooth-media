@@ -26,6 +26,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Read plugin version
+        shell: pwsh
+        run: |
+          $cmake = Get-Content CMakeLists.txt -Raw
+          if ($cmake -notmatch 'project\(obs-smooth-media VERSION ([0-9]+\.[0-9]+\.[0-9]+)\)') {
+            throw "Plugin version was not found in CMakeLists.txt"
+          }
+          $version = $Matches[1]
+          if ("${{ github.ref_type }}" -eq "tag" -and
+              "${{ github.ref_name }}" -ne "v$version") {
+            throw "Tag ${{ github.ref_name }} does not match plugin version $version"
+          }
+          "PLUGIN_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -149,11 +163,100 @@ jobs:
             Copy-Item -Recurse data/* artifact/data/obs-plugins/${{ env.PLUGIN_NAME }}/
           }
 
+      - name: Build and test installer
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "installer/windows/update.ps1"),
+            [ref]$tokens,
+            [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            throw ($parseErrors | Out-String)
+          }
+
+          $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty Source
+          if (-not $iscc) {
+            $candidates = @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+            )
+            $iscc = $candidates | Where-Object { Test-Path -LiteralPath $_ } |
+              Select-Object -First 1
+          }
+          if (-not $iscc) {
+            throw "Inno Setup compiler was not found"
+          }
+
+          & $iscc "/DAppVersion=$env:PLUGIN_VERSION" `
+            "installer/windows/obs-smooth-media.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+          }
+
+          $setup = Resolve-Path `
+            "installer-output/${{ env.PLUGIN_NAME }}-windows-x64-setup.exe"
+          $obsDir = (Resolve-Path "deps/obs-studio").Path
+          $arguments = @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/DIR=$obsDir"
+          )
+          $install = Start-Process -FilePath $setup -ArgumentList $arguments `
+            -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "Installer smoke test failed with exit code $($install.ExitCode)"
+          }
+
+          $builtDll = "artifact/obs-plugins/64bit/${{ env.PLUGIN_NAME }}.dll"
+          $installedDll = Join-Path $obsDir `
+            "obs-plugins/64bit/${{ env.PLUGIN_NAME }}.dll"
+          if (-not (Test-Path -LiteralPath $installedDll)) {
+            throw "Installer did not place the plugin DLL"
+          }
+          if ((Get-FileHash $builtDll).Hash -ne
+              (Get-FileHash $installedDll).Hash) {
+            throw "Installed DLL does not match the release DLL"
+          }
+          $updater = Join-Path $obsDir `
+            "data/obs-plugins/${{ env.PLUGIN_NAME }}/update.ps1"
+          if (-not (Test-Path -LiteralPath $updater)) {
+            throw "Installer did not place the updater"
+          }
+          & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File $updater -CheckOnly
+          if ($LASTEXITCODE -ne 0) {
+            throw "Updater smoke test failed with exit code $LASTEXITCODE"
+          }
+
+          $uninstaller = Get-ChildItem -LiteralPath $obsDir `
+            -Filter "unins*.exe" | Select-Object -First 1
+          if (-not $uninstaller) {
+            throw "Installer did not create an uninstaller"
+          }
+          $uninstall = Start-Process -FilePath $uninstaller.FullName `
+            -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") `
+            -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) {
+            throw "Uninstaller smoke test failed with exit code $($uninstall.ExitCode)"
+          }
+          if (Test-Path -LiteralPath $installedDll) {
+            throw "Uninstaller left the plugin DLL behind"
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $obsDir "bin/64bit/obs64.exe"))) {
+            throw "Uninstaller damaged the OBS installation"
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PLUGIN_NAME }}-windows-x64
-          path: artifact/
+          path: |
+            artifact/
+            installer-output/*.exe
           retention-days: 90
 
       - name: Publish release (on tag)
@@ -164,6 +267,7 @@ jobs:
         run: |
           $zip = "${{ env.PLUGIN_NAME }}-${{ github.ref_name }}-windows-x64.zip"
           Compress-Archive -Path artifact/* -DestinationPath $zip -Force
-          gh release create "${{ github.ref_name }}" $zip `
+          $installer = "installer-output/${{ env.PLUGIN_NAME }}-windows-x64-setup.exe"
+          gh release create "${{ github.ref_name }}" $zip $installer `
             --title "${{ github.ref_name }}" `
             --generate-notes
