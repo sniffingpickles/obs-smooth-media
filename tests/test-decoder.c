@@ -93,6 +93,59 @@ static void test_invalid_inputs(void)
 	CHECK(result < 0);
 }
 
+static const char *dict_value(AVDictionary *options, const char *key)
+{
+	const AVDictionaryEntry *entry = av_dict_get(options, key, NULL, 0);
+	return entry ? entry->value : NULL;
+}
+
+static bool dict_value_is(AVDictionary *options, const char *key,
+			  const char *expected)
+{
+	const char *value = dict_value(options, key);
+	return value && strcmp(value, expected) == 0;
+}
+
+static void test_input_options(void)
+{
+	AVDictionary *options = NULL;
+	CHECK(stream_decoder_prepare_input_options(
+		      &options, "rtmp://example.test/live/feed", 2097152,
+		      NULL) == 0);
+	CHECK(dict_value_is(options, "buffer_size", "2097152"));
+	CHECK(dict_value_is(options, "rw_timeout", "30000000"));
+	CHECK(dict_value_is(options, "rtmp_enhanced_codecs", "hvc1,av01,vp09"));
+	av_dict_free(&options);
+
+	CHECK(stream_decoder_prepare_input_options(
+		      &options, "rtmps://example.test/live/feed", 0,
+		      "rtmp_enhanced_codecs=av01") == 0);
+	CHECK(dict_value_is(options, "rtmp_enhanced_codecs", "av01"));
+	CHECK(dict_value(options, "buffer_size") == NULL);
+	av_dict_free(&options);
+
+	CHECK(stream_decoder_prepare_input_options(
+		      &options, "rist://example.test:9000", 2097152, NULL) == 0);
+	CHECK(dict_value(options, "buffer_size") == NULL);
+	CHECK(dict_value_is(options, "timeout", "30000000"));
+	CHECK(dict_value_is(options, "log_level", "-1"));
+	CHECK(dict_value(options, "rtmp_enhanced_codecs") == NULL);
+	av_dict_free(&options);
+
+	CHECK(stream_decoder_prepare_input_options(
+		      &options, "srt://example.test:9000", 0, NULL) == 0);
+	CHECK(dict_value_is(options, "timeout", "30000000"));
+	CHECK(dict_value(options, "rtmp_enhanced_codecs") == NULL);
+	av_dict_free(&options);
+
+	CHECK(stream_decoder_prepare_input_options(
+		      &options, "rtmp://example.test/live/feed", 0,
+		      "missing-value") < 0);
+	av_dict_free(&options);
+	CHECK(stream_decoder_prepare_input_options(NULL, "rtmp://example.test",
+						   0, NULL) == AVERROR(EINVAL));
+}
+
 static uint64_t convert_audio_at_speed(double speed)
 {
 	struct audio_speed_converter converter;
@@ -309,6 +362,7 @@ int main(int argc, char **argv)
 	}
 
 	test_invalid_inputs();
+	test_input_options();
 	test_audio_speed_conversion();
 	test_decode_file(argv[1]);
 	test_corrupt_stream_recovery(argv[2]);

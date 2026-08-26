@@ -53,6 +53,8 @@ The default settings are a good starting point.
 
 RTMP, SRT, and RIST support depends on the FFmpeg build loaded by OBS. The
 plugin lists the available protocols in the OBS log when it starts.
+Enhanced RTMP feeds automatically advertise AV1, HEVC, and VP9 support to
+compatible servers such as MediaMTX.
 
 ## If something goes wrong
 

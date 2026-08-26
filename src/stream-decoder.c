@@ -16,6 +16,7 @@ static bool sd_initialized = false;
 static pthread_mutex_t sd_init_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define DEFAULT_OPEN_TIMEOUT_US INT64_C(35000000)
+#define DEFAULT_RTMP_ENHANCED_CODECS "hvc1,av01,vp09"
 
 static char *sd_strdup(const char *value)
 {
@@ -254,6 +255,69 @@ static void free_decoder(struct stream_decode_ctx *ctx)
 	memset(ctx, 0, sizeof(*ctx));
 }
 
+int stream_decoder_prepare_input_options(AVDictionary **options,
+					 const char *url, int buffering_bytes,
+					 const char *ffmpeg_options)
+{
+	if (!options)
+		return AVERROR(EINVAL);
+
+	/* "buffer_size" is the UDP/RTP socket receive buffer in bytes. RIST
+	 * uses the same option name for milliseconds, so never pass the byte
+	 * value to a RIST input. */
+	bool is_rist = url && strncmp(url, "rist", 4) == 0;
+	if (buffering_bytes > 0 && !is_rist) {
+		int ret = av_dict_set_int(options, "buffer_size", buffering_bytes,
+					  0);
+		if (ret < 0)
+			return ret;
+	}
+
+	if (ffmpeg_options && *ffmpeg_options) {
+		int ret = av_dict_parse_string(options, ffmpeg_options, "=", " ",
+					       0);
+		if (ret < 0)
+			return ret;
+	}
+
+	/* FFmpeg can demux Enhanced RTMP codecs, but does not advertise them to
+	 * the server unless fourCcList is explicitly configured. MediaMTX then
+	 * omits unadvertised video tracks, which looks like an audio-only feed.
+	 * Keep an advanced user's explicit list if one was supplied. */
+	if (url) {
+		if (strncmp(url, "rtmp", 4) == 0) {
+			/* RTMP's "timeout" option enables listener mode. rw_timeout
+			 * limits client I/O without changing the connection mode. */
+			int ret = av_dict_set(options, "rw_timeout", "30000000", 0);
+			if (ret < 0)
+				return ret;
+			ret = av_dict_set(options, "rtmp_enhanced_codecs",
+					  DEFAULT_RTMP_ENHANCED_CODECS,
+					  AV_DICT_DONT_OVERWRITE);
+			if (ret < 0)
+				return ret;
+		} else if (strncmp(url, "srt", 3) == 0) {
+			int ret = av_dict_set(options, "timeout", "30000000", 0);
+			if (ret < 0)
+				return ret;
+		} else if (is_rist) {
+			int ret = av_dict_set(options, "timeout", "30000000", 0);
+			if (ret < 0)
+				return ret;
+			/* FFmpeg hands libRIST an AV_LOG callback backed by the
+			 * protocol context. Rapid receiver teardown/reopen on Windows
+			 * can invoke it after that context is gone. Keep libRIST's
+			 * internal callback silent; transport failures are still
+			 * reported by the read/open paths. */
+			ret = av_dict_set(options, "log_level", "-1", 0);
+			if (ret < 0)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+
 struct stream_decoder *
 stream_decoder_create(const struct stream_decoder_info *info)
 {
@@ -317,26 +381,14 @@ stream_decoder_create(const struct stream_decoder_info *info)
 	}
 
 	AVDictionary *opts = NULL;
-	/* "buffer_size" is the UDP/RTP socket receive buffer in BYTES. Do NOT
-	 * set it for RIST: there the option means milliseconds (valid range
-	 * 0–30000), so a byte value like 2 MB is out of range and makes librist
-	 * reject the connection — i.e. RIST playback fails to open. It's
-	 * harmlessly ignored by SRT/RTMP, but skip it for RIST entirely. */
-	bool is_rist = sd->url && strncmp(sd->url, "rist", 4) == 0;
-	if (sd->buffering > 0 && !is_rist) {
-		av_dict_set_int(&opts, "buffer_size", sd->buffering, 0);
-	}
-
-	if (sd->ffmpeg_options && *sd->ffmpeg_options) {
-		int parse_ret = av_dict_parse_string(&opts, sd->ffmpeg_options,
-						     "=", " ", 0);
-		if (parse_ret < 0) {
-			if (info->open_result)
-				*info->open_result = parse_ret;
-			av_dict_free(&opts);
-			stream_decoder_destroy(sd);
-			return NULL;
-		}
+	int options_ret = stream_decoder_prepare_input_options(
+		&opts, sd->url, sd->buffering, sd->ffmpeg_options);
+	if (options_ret < 0) {
+		if (info->open_result)
+			*info->open_result = options_ret;
+		av_dict_free(&opts);
+		stream_decoder_destroy(sd);
+		return NULL;
 	}
 
 	sd->fmt_ctx = avformat_alloc_context();
@@ -351,31 +403,6 @@ stream_decoder_create(const struct stream_decoder_info *info)
 		sd->fmt_ctx->flags |= AVFMT_FLAG_NOBUFFER;
 	}
 
-	/* Set protocol-appropriate timeouts (microseconds) for network streams.
-	 *
-	 * IMPORTANT: do NOT set "timeout" for RTMP. FFmpeg's native RTMP
-	 * protocol treats "timeout" as the *listen* timeout and it IMPLIES
-	 * listen (server) mode — the connection then tries to bind() to the
-	 * remote address and fails with "can't assign requested address"
-	 * (WSAEADDRNOTAVAIL on Windows). For RTMP we use the AVIO-level
-	 * rw_timeout instead, which is the client read/write timeout and does
-	 * not change the connection mode. For SRT/RIST, "timeout" is the
-	 * (correct) connection timeout. */
-	if (sd->url) {
-		if (strncmp(sd->url, "rtmp", 4) == 0) {
-			av_dict_set(&opts, "rw_timeout", "30000000", 0);
-		} else if (strncmp(sd->url, "srt", 3) == 0) {
-			av_dict_set(&opts, "timeout", "30000000", 0);
-		} else if (strncmp(sd->url, "rist", 4) == 0) {
-			av_dict_set(&opts, "timeout", "30000000", 0);
-			/* FFmpeg hands libRIST an AV_LOG callback backed by the
-			 * protocol context. Rapid receiver teardown/reopen on Windows
-			 * can invoke it after that context is gone. Keep libRIST's
-			 * internal callback silent; transport failures are still
-			 * reported by the read/open paths below. */
-			av_dict_set(&opts, "log_level", "-1", 0);
-		}
-	}
 	sd->fmt_ctx->interrupt_callback.callback = interrupt_callback;
 	sd->fmt_ctx->interrupt_callback.opaque = sd;
 

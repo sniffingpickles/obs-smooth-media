@@ -141,6 +141,12 @@ struct stream_decoder {
 	int64_t interrupt_deadline_us; /* media-thread open/probe deadline */
 };
 
+/* Build the FFmpeg options used to open an input. Exposed so protocol option
+ * defaults can be regression-tested without making a network connection. */
+int stream_decoder_prepare_input_options(AVDictionary **options,
+					 const char *url, int buffering_bytes,
+					 const char *ffmpeg_options);
+
 /* Create and open the stream. Returns NULL on failure. */
 struct stream_decoder *
 stream_decoder_create(const struct stream_decoder_info *info);
