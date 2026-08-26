@@ -355,9 +355,29 @@ void audio_buffer_note_underrun(struct audio_buffer *ab)
 	if (!ab)
 		return;
 	pthread_mutex_lock(&ab->mutex);
+	/* An empty primed queue is a discontinuity, not ordinary low fill. Hold
+	 * newly arriving frames until the larger recovery target is available.
+	 * Otherwise one frame is released and the queue empties again, producing
+	 * a repeating audio/silence cycle and a stream of late timestamps. */
+	ab->primed = false;
 	ab->underrun_credit_ns += UNDERRUN_CREDIT_STEP_NS;
 	if (ab->underrun_credit_ns > UNDERRUN_CREDIT_CAP_NS)
 		ab->underrun_credit_ns = UNDERRUN_CREDIT_CAP_NS;
+	recalc_target(ab);
+	pthread_mutex_unlock(&ab->mutex);
+}
+
+void audio_buffer_note_discontinuity(struct audio_buffer *ab)
+{
+	if (!ab)
+		return;
+	pthread_mutex_lock(&ab->mutex);
+	ab->prev_arrival_ns = 0;
+	ab->prev_arrival_pts_ns = 0;
+	ab->have_arrival_ref = false;
+	ab->delivery_gap_ns = 0;
+	ab->last_gap_decay_ns = 0;
+	ab->jitter_ns = 0;
 	recalc_target(ab);
 	pthread_mutex_unlock(&ab->mutex);
 }
@@ -428,9 +448,9 @@ bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out)
 	ab->count--;
 	ab->frames_out++;
 
-	/* Once primed, stay primed. Only audio_buffer_reset() clears this.
-	 * Un-priming on empty caused a stutter cycle: fill 500ms → burst
-	 * drain → silence while re-filling → repeat every 500ms. */
+	/* Staying primed during normal drain avoids needless pauses. A genuine
+	 * empty-queue underrun explicitly clears primed in
+	 * audio_buffer_note_underrun(), after the consumer has observed it. */
 
 	*out = o;
 	pthread_mutex_unlock(&ab->mutex);

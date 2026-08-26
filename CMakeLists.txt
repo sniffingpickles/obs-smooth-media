@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(obs-smooth-media VERSION 1.4.21)
+project(obs-smooth-media VERSION 1.4.22)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -64,7 +64,7 @@ endif()
 # the install-path definitions below, so generate a private copy when an OBS
 # build tree did not already provide one.
 set(OBS_GENERATED_INCLUDE_DIR "")
-if(WIN32 AND NOT EXISTS "${OBS_INCLUDE_DIR}/obsconfig.h")
+if(NOT EXISTS "${OBS_INCLUDE_DIR}/obsconfig.h")
     set(OBS_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/obs")
     file(MAKE_DIRECTORY "${OBS_GENERATED_INCLUDE_DIR}")
     configure_file(
@@ -123,6 +123,7 @@ set(PLUGIN_SOURCES
     src/audio-buffer.c
     src/audio-speed.c
     src/clock-tracker.c
+    src/output-timeline.c
     src/websocket-api.c
 )
 
@@ -132,6 +133,7 @@ set(PLUGIN_HEADERS
     src/audio-buffer.h
     src/audio-speed.h
     src/clock-tracker.h
+    src/output-timeline.h
     src/websocket-api.h
     src/obs-websocket-api.h
 )

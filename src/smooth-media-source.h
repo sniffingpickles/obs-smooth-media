@@ -1,6 +1,6 @@
 #pragma once
 
-#define SMOOTH_MEDIA_VERSION "1.4.21"
+#define SMOOTH_MEDIA_VERSION "1.4.22"
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -9,6 +9,7 @@
 #include "audio-buffer.h"
 #include "audio-speed.h"
 #include "clock-tracker.h"
+#include "output-timeline.h"
 #include "stream-decoder.h"
 
 /*
@@ -27,7 +28,8 @@ struct smooth_media_source {
 	char *input_format;
 	char *ffmpeg_options;
 	bool hw_decode;
-	bool sync_pts;
+	volatile bool sync_pts;
+	bool adaptive_audio_speed;
 	bool close_when_inactive;
 	volatile bool
 		disable_video; /* audio-only: skip video output (eases remote testing) */
@@ -39,6 +41,7 @@ struct smooth_media_source {
 	struct audio_buffer audio_buf;
 	struct audio_speed_converter speed_converter;
 	struct clock_tracker clock;
+	struct output_timeline audio_timeline;
 
 	/* Playback state */
 	pthread_mutex_t lifecycle_mutex;
@@ -59,6 +62,10 @@ struct smooth_media_source {
 	/* Timestamp tracking for output */
 	int64_t audio_out_ts; /* last audio output timestamp */
 	int64_t video_out_ts; /* last video output timestamp */
+	int64_t audio_sync_pts; /* media PTS for the latest audio timing anchor */
+	int64_t audio_sync_ts;  /* OBS timestamp paired with audio_sync_pts */
+	int64_t video_media_pts; /* media PTS for the latest video output */
+	bool audio_sync_valid;
 	volatile bool first_audio;
 	bool first_video;
 	bool got_first_keyframe;
@@ -66,8 +73,7 @@ struct smooth_media_source {
 	int64_t first_video_pts;
 	int64_t prev_video_pts;    /* previous video PTS for delta stepping */
 	int64_t video_next_ts;     /* monotonic video output timestamp */
-	int64_t prev_audio_pts;    /* previous audio PTS for delta stepping */
-	int64_t audio_next_ts;     /* monotonic audio output timestamp */
+	int64_t prev_audio_pts;    /* previous audio PTS for discontinuity checks */
 	uint64_t audio_frames_out; /* counter for periodic diagnostics */
 	uint64_t video_frames_out; /* counter for periodic diagnostics */
 	uint64_t last_drop_count;  /* for detecting new drops */
@@ -75,14 +81,14 @@ struct smooth_media_source {
 	uint64_t pending_drop_count;    /* drops since last overflow log */
 	int64_t last_diag_time;         /* wall clock of last diagnostic log */
 	uint64_t underrun_count;        /* total drain underruns (debug) */
-	bool audio_starved; /* coalesce one stall into one underrun event */
-	int64_t last_underrun_log_time; /* rate-limit for debug underrun logs */
+	uint64_t recovery_count; /* completed controlled rebuffer cycles */
+	volatile bool audio_rebuffering; /* hold A/V until recovery reserve exists */
+	bool video_reanchor_pending; /* align video to a recovered audio epoch */
 	int64_t stream_start_time;      /* wall clock when stream opened */
 	int64_t clock_skip_until_ns; /* skip rate measurement until this wall time
                                      (connect/stall settle) */
 	int64_t last_audio_arrival_ns; /* wall time of previous audio frame (stall
                                      detection) */
-	int64_t last_audio_pts_ns;     /* PTS of previous audio frame */
 	bool did_initial_trim; /* one-shot: trim the connect burst backlog to target */
 	double sr_ratio;       /* slew-limited in-plugin playback ratio */
 	double playback_ratio; /* in-plugin audio speed shared with video pacing */

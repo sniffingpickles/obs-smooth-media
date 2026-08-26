@@ -117,9 +117,16 @@ bool audio_buffer_push(struct audio_buffer *ab, const uint8_t *const *data,
  * unaffected by concurrent pushes. */
 bool audio_buffer_pop(struct audio_buffer *ab, struct audio_buf_frame **out);
 
-/* Record that the consumer wanted a frame but the buffer was empty. Grows the
- * adaptive cushion so playback rebuilds a deeper buffer after a stall. */
+/* Record that the consumer wanted a frame but the buffer was empty. Playback
+ * is un-primed and the adaptive cushion grows, so recovery waits for a useful
+ * reserve instead of releasing isolated late frames. */
 void audio_buffer_note_underrun(struct audio_buffer *ab);
+
+/* Forget arrival timing learned before a confirmed stream interruption while
+ * preserving queued media and underrun credit. The first frame after a long
+ * outage is a new timing epoch, not evidence that the network routinely
+ * delivers multi-second batches. */
+void audio_buffer_note_discontinuity(struct audio_buffer *ab);
 
 /* Drop oldest frames until the level is back at the adaptive target. Used once
  * after the connect burst to discard the server's stale backlog and start near

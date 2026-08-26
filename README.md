@@ -4,8 +4,8 @@ An OBS source for remote RTMP, SRT, and RIST feeds.
 
 Use it when a normal Media Source starts sounding choppy, falls out of sync,
 or needs to be restarted after a rough network patch. Smooth Media Source
-keeps a small audio buffer, gently adjusts playback speed to stay in sync, and
-reconnects when the feed drops.
+keeps a small audio buffer, rebuilds that buffer cleanly after a dropout, and
+reconnects when the feed drops. Audio stays at its original speed by default.
 
 This plugin was made for remote cameras, guest feeds, and IRL streams. It is
 currently in beta.
@@ -46,6 +46,7 @@ The default settings are a good starting point.
 | Reconnect Delay | How long to wait before reconnecting |
 | Hardware Decoding | Uses the GPU when a supported decoder is available |
 | Sync A/V via PTS | Uses the feed timestamps for tighter A/V sync |
+| Adaptive Audio Speed | Slightly corrects a feed whose clock always runs fast or slow; leave off for original-speed audio |
 | Close When Inactive | Disconnects when the source is not in use |
 | Disable Video Preview | Keeps audio running without sending video to OBS |
 | FFmpeg Options | Extra input options for unusual feeds |

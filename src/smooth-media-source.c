@@ -16,13 +16,14 @@
 #define JITTER_BUFFER_MS            80
 #define SR_WARMUP_NS                (8000000000LL)
 #define SR_SLEW_PER_POP             0.0005
-#define SR_EMERGENCY_SLEW_PER_POP   0.0015
 #define SR_SLOW_ALPHA               0.0015
-#define PLAYBACK_RATIO_MIN          0.90
-#define PLAYBACK_RATIO_MAX          1.10
+#define PLAYBACK_RATIO_MIN          0.98
+#define PLAYBACK_RATIO_MAX          1.02
 #define CLOCK_SETTLE_NS             SR_WARMUP_NS
 /* MPEG-TS audio can arrive in ordinary ~600ms batches. */
 #define STALL_GAP_NS                (2000000000LL)
+#define AV_SYNC_MAX_DELTA_NS         (5000000000LL)
+#define AV_SYNC_MAX_VIDEO_LEAD_NS    (1500000000LL)
 
 /* Forward declarations */
 static void smooth_media_update(void *data, obs_data_t *settings);
@@ -202,6 +203,12 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 	 * OBS. Lets you test audio over a slow remote-desktop session. */
 	if (os_atomic_load_bool(&s->disable_video))
 		return;
+	/* Once audio starves, do not let decoded video run ahead while the audio
+	 * reserve is rebuilt. The recovery audio anchor is published before this
+	 * hold is released, so the first post-outage picture starts on the same
+	 * media timeline instead of carrying a guessed offset. */
+	if (os_atomic_load_bool(&s->audio_rebuffering))
+		return;
 
 	/* NOTE: we intentionally do NOT feed video PTS into the clock
 	 * tracker.  Video decoding is susceptible to GPU-contention
@@ -221,36 +228,94 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 		       (long long)(vf->pts_ns / 1000000));
 	}
 
-	/* Compute output timestamp using PTS-delta stepping.
-	 * Video is always the timing master — same logic regardless
-	 * of sync_pts setting. PTS deltas give smooth frame spacing;
-	 * asymmetric drift correction keeps timestamps near wall clock.
-	 *
-	 * Video is offset forward by the (adaptive) jitter buffer depth so
-	 * OBS holds the frame before displaying it. This compensates for the
-	 * delay audio experiences sitting in the jitter buffer and keeps lips
-	 * synced as the target depth adapts to link jitter. */
+	/* With PTS sync enabled, audio is the presentation clock. Every emitted
+	 * audio block publishes an exact media-PTS -> OBS-timestamp anchor; map
+	 * video through that anchor instead of guessing its delay from the current
+	 * buffer depth, which changes throughout recovery. */
 	struct audio_buffer_stats buffer_stats;
 	audio_buffer_get_stats(&s->audio_buf, &buffer_stats);
-	/* Match video delay to the audio actually queued, not only the desired
-	 * target. During a fast feed or recovery refill, level can sit above
-	 * target; using target alone makes video lead the buffered audio. */
 	int64_t buf_offset = buffer_stats.level_ns;
 	if (buf_offset < buffer_stats.target_ns)
 		buf_offset = buffer_stats.target_ns;
 	if (buf_offset > buffer_stats.max_ns)
 		buf_offset = buffer_stats.max_ns;
-	int64_t out_ts;
+	buf_offset = saturating_add_i64(buf_offset,
+					OUTPUT_TIMELINE_LEAD_NS);
+	int64_t out_ts = 0;
+	bool force_reanchor = false;
+	pthread_mutex_lock(&s->controller_mutex);
+	if (s->video_reanchor_pending) {
+		force_reanchor = true;
+		s->video_reanchor_pending = false;
+	}
+	pthread_mutex_unlock(&s->controller_mutex);
 
 	pthread_mutex_lock(&s->timing_mutex);
 	bool first_output = s->video_frames_out == 0;
+	bool audio_sync_valid = s->audio_sync_valid;
+	int64_t audio_sync_pts = s->audio_sync_pts;
+	int64_t audio_sync_ts = s->audio_sync_ts;
 	pthread_mutex_unlock(&s->timing_mutex);
 
-	if (first_output) {
+	pthread_mutex_lock(&s->controller_mutex);
+	double rate = s->playback_ratio;
+	pthread_mutex_unlock(&s->controller_mutex);
+	if (rate != rate)
+		rate = 1.0;
+	else if (rate < PLAYBACK_RATIO_MIN)
+		rate = PLAYBACK_RATIO_MIN;
+	else if (rate > PLAYBACK_RATIO_MAX)
+		rate = PLAYBACK_RATIO_MAX;
+
+	bool pts_mapped = false;
+	if (os_atomic_load_bool(&s->sync_pts) && audio_sync_valid) {
+		int64_t pts_delta = 0;
+		bool delta_valid = false;
+		if (vf->pts_ns >= audio_sync_pts) {
+			uint64_t delta = (uint64_t)vf->pts_ns -
+					 (uint64_t)audio_sync_pts;
+			if (delta <= (uint64_t)AV_SYNC_MAX_DELTA_NS) {
+				pts_delta = (int64_t)delta;
+				delta_valid = true;
+			}
+		} else {
+			uint64_t delta = (uint64_t)audio_sync_pts -
+					 (uint64_t)vf->pts_ns;
+			if (delta <= (uint64_t)AV_SYNC_MAX_DELTA_NS) {
+				pts_delta = -(int64_t)delta;
+				delta_valid = true;
+			}
+		}
+
+		if (delta_valid) {
+			int64_t mapped = saturating_add_i64(
+				audio_sync_ts,
+				(int64_t)((double)pts_delta / rate));
+			int64_t min_ts = saturating_add_i64(
+				wall_now, OUTPUT_TIMELINE_MIN_LEAD_NS);
+			int64_t max_ts = saturating_add_i64(
+				wall_now, AV_SYNC_MAX_VIDEO_LEAD_NS);
+			/* A demux batch can deliver audio packets before the video
+			 * packets that sit beside them. If that makes a mapped frame a
+			 * few milliseconds late, present it at the earliest safe OBS
+			 * timestamp instead of turning packet ordering into visible
+			 * frame loss. */
+			if (mapped < min_ts)
+				mapped = min_ts;
+			if (mapped <= max_ts) {
+				out_ts = mapped;
+				pts_mapped = true;
+			}
+		}
+	}
+
+	/* Before audio is available, for video-only sources, or when PTS sync is
+	 * disabled, retain the wall-clock fallback. */
+	if (!pts_mapped && (first_output || force_reanchor)) {
 		out_ts = wall_now + buf_offset;
 		s->video_next_ts = wall_now + buf_offset;
 		s->prev_video_pts = vf->pts_ns;
-	} else {
+	} else if (!pts_mapped) {
 		int64_t prev_video_pts = s->prev_video_pts;
 		uint64_t pts_delta_u =
 			(uint64_t)vf->pts_ns - (uint64_t)prev_video_pts;
@@ -259,23 +324,6 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 		if (vf->pts_ns > prev_video_pts &&
 		    pts_delta_u < UINT64_C(500000000)) {
 			int64_t pts_delta = (int64_t)pts_delta_u;
-			/* Convert media-clock spacing to wall-clock spacing. A
-			 * 0.98x stream's 16.67 ms PTS step is about 17.0 ms in
-			 * realtime; using the raw delta made video drift away
-			 * from audio by tens of milliseconds per minute. */
-			/* Use the same playback-rate ratio currently applied to
-			 * audio. Following the faster raw clock estimate here while
-			 * audio deliberately slews its speed caused a
-			 * transition-period lip-sync error. */
-			pthread_mutex_lock(&s->controller_mutex);
-			double rate = s->playback_ratio;
-			pthread_mutex_unlock(&s->controller_mutex);
-			if (rate != rate)
-				rate = 1.0;
-			else if (rate < PLAYBACK_RATIO_MIN)
-				rate = PLAYBACK_RATIO_MIN;
-			else if (rate > PLAYBACK_RATIO_MAX)
-				rate = PLAYBACK_RATIO_MAX;
 			s->video_next_ts = saturating_add_i64(
 				s->video_next_ts,
 				(int64_t)((double)pts_delta / rate));
@@ -303,11 +351,15 @@ static void on_video_frame(void *opaque, struct decoded_video_frame *vf)
 
 		out_ts = s->video_next_ts;
 	}
+	s->prev_video_pts = vf->pts_ns;
 	pthread_mutex_lock(&s->timing_mutex);
-	if (s->video_frames_out > 0 && out_ts <= s->video_out_ts)
-		out_ts = s->video_out_ts + 1;
+	if (s->video_frames_out > 0 && out_ts <= s->video_out_ts) {
+		pthread_mutex_unlock(&s->timing_mutex);
+		return;
+	}
 	s->video_next_ts = out_ts;
 	s->video_out_ts = out_ts;
+	s->video_media_pts = vf->pts_ns;
 	s->video_frames_out++;
 	pthread_mutex_unlock(&s->timing_mutex);
 
@@ -376,8 +428,13 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		int64_t d_arr = wall_now - s->last_audio_arrival_ns;
 		if (d_arr > STALL_GAP_NS) {
 			clock_tracker_reset(&s->clock);
+			/* A confirmed outage is a boundary, not a representative
+			 * delivery gap. Preserve the underrun reserve but
+			 * learn post-recovery jitter from scratch. */
+			audio_buffer_note_discontinuity(&s->audio_buf);
 			pthread_mutex_lock(&s->controller_mutex);
 			s->clock_skip_until_ns = wall_now + CLOCK_SETTLE_NS;
+			s->video_reanchor_pending = true;
 			/* Re-arm the trim: once the post-stall catch-up settles,
 			 * drop the stale backlog back to target — jump to live
 			 * and restore the jitter headroom instead of carrying
@@ -387,7 +444,6 @@ static void on_audio_frame(void *opaque, struct decoded_audio_frame *af)
 		}
 	}
 	s->last_audio_arrival_ns = wall_now;
-	s->last_audio_pts_ns = af->pts_ns;
 
 	pthread_mutex_lock(&s->controller_mutex);
 	int64_t clock_skip_until_ns = s->clock_skip_until_ns;
@@ -663,6 +719,10 @@ static void start_media_locked(struct smooth_media_source *s)
 	s->got_first_keyframe = false;
 	s->audio_out_ts = 0;
 	s->video_out_ts = 0;
+	s->audio_sync_pts = 0;
+	s->audio_sync_ts = 0;
+	s->video_media_pts = 0;
+	s->audio_sync_valid = false;
 	s->audio_frames_out = 0;
 	s->video_frames_out = 0;
 	s->last_drop_count = 0;
@@ -670,23 +730,23 @@ static void start_media_locked(struct smooth_media_source *s)
 	s->pending_drop_count = 0;
 	s->last_diag_time = 0;
 	s->underrun_count = 0;
-	s->audio_starved = false;
-	s->last_underrun_log_time = 0;
+	s->recovery_count = 0;
+	os_atomic_set_bool(&s->audio_rebuffering, false);
+	s->video_reanchor_pending = false;
 	s->stream_start_time = (int64_t)os_gettime_ns();
 	s->clock_skip_until_ns = s->stream_start_time + CLOCK_SETTLE_NS;
 	s->last_audio_arrival_ns = 0;
-	s->last_audio_pts_ns = 0;
 	s->did_initial_trim = false;
 	s->sr_ratio = 1.0;
 	s->playback_ratio = 1.0;
 	s->sr_slow_rate = 1.0;
 	audio_speed_reset(&s->speed_converter);
+	output_timeline_reset(&s->audio_timeline);
 	s->last_audio_pop_time = 0;
 	s->audio_frame_dur_ns = 0;
 	s->prev_video_pts = 0;
 	s->video_next_ts = 0;
 	s->prev_audio_pts = 0;
-	s->audio_next_ts = 0;
 	os_atomic_set_bool(&s->active, true);
 	os_atomic_set_bool(&s->kill, false);
 	s->reconnecting = false;
@@ -763,7 +823,8 @@ static void smooth_media_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "reconnect_delay_sec", 5);
 	obs_data_set_default_bool(settings, "hw_decode", false);
-	obs_data_set_default_bool(settings, "sync_pts", false);
+	obs_data_set_default_bool(settings, "sync_pts", true);
+	obs_data_set_default_bool(settings, "adaptive_audio_speed", false);
 	obs_data_set_default_bool(settings, "close_when_inactive", true);
 	obs_data_set_default_bool(settings, "disable_video", false);
 	obs_data_set_default_bool(settings, "debug_logging", false);
@@ -824,8 +885,15 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 
 	p = obs_properties_add_bool(play, "sync_pts", "Sync A/V via PTS");
 	obs_property_set_long_description(
-		p, "Use presentation timestamps for audio-video sync.\n"
-		   "May help streams with inconsistent frame timing.");
+		p, "Keep audio and video aligned to presentation timestamps and\n"
+		   "reset cleanly after timestamp jumps. Recommended for live streams.");
+
+	p = obs_properties_add_bool(play, "adaptive_audio_speed",
+				    "Adaptive Audio Speed");
+	obs_property_set_long_description(
+		p, "Slightly change playback speed to follow a feed that runs\n"
+		   "consistently fast or slow. Leave off for original audio speed.\n"
+		   "Severe interruptions always use a controlled rebuffer.");
 
 	p = obs_properties_add_bool(play, "close_when_inactive",
 				    "Close When Inactive");
@@ -1001,7 +1069,22 @@ static void smooth_media_update(void *data, obs_data_t *settings)
 	s->ffmpeg_options = new_opts;
 	s->hw_decode = new_hw;
 
-	s->sync_pts = obs_data_get_bool(settings, "sync_pts");
+	os_atomic_set_bool(&s->sync_pts,
+			   obs_data_get_bool(settings, "sync_pts"));
+	bool new_adaptive_audio_speed =
+		obs_data_get_bool(settings, "adaptive_audio_speed");
+	bool audio_mode_changed =
+		s->adaptive_audio_speed != new_adaptive_audio_speed;
+	s->adaptive_audio_speed = new_adaptive_audio_speed;
+	if (audio_mode_changed) {
+		pthread_mutex_lock(&s->controller_mutex);
+		s->sr_ratio = 1.0;
+		s->playback_ratio = 1.0;
+		s->sr_slow_rate = 1.0;
+		s->video_reanchor_pending = true;
+		pthread_mutex_unlock(&s->controller_mutex);
+		audio_speed_reset(&s->speed_converter);
+	}
 	s->close_when_inactive =
 		obs_data_get_bool(settings, "close_when_inactive");
 	bool disable_video = obs_data_get_bool(settings, "disable_video");
@@ -1141,11 +1224,10 @@ static void smooth_media_tick(void *data, float seconds)
 						   1000000));
 		}
 
-		/* ── Closed-loop playback pacing ──
-		 * The media-clock estimate supplies the long-term pace. Buffer
-		 * occupancy adds a bounded correction: underfill gently slows
-		 * playback; recovery backlog gently speeds it up. The exact same
-		 * ratio drives pop cadence, audio conversion, and video PTS. */
+		/* Original-speed mode is deliberately open-loop: decoded samples are
+		 * never stretched or resampled. Adaptive mode remains available for
+		 * feeds whose hardware clock consistently runs fast or slow, but its
+		 * correction is narrow and severe gaps always rebuffer instead. */
 		int64_t target = audio_buffer_target_ns(&s->audio_buf);
 		int64_t level = audio_buffer_level_ns(&s->audio_buf);
 		double lvl_err = 0.0;
@@ -1157,36 +1239,41 @@ static void smooth_media_tick(void *data, float seconds)
 				lvl_err = 0.5;
 		}
 
-		/* Smooth the long-term estimate, then combine it with the
-		 * occupancy correction. Underfill gets more authority than
-		 * overfill: avoiding silence is worth a larger tempo change,
-		 * while recovery catch-up should remain subtle. */
 		s->sr_slow_rate += SR_SLOW_ALPHA * (rate - s->sr_slow_rate);
 		pthread_mutex_lock(&s->controller_mutex);
 		int64_t controller_start_time = s->stream_start_time;
 		pthread_mutex_unlock(&s->controller_mutex);
 		bool in_warmup =
 			(wall_now - controller_start_time) < SR_WARMUP_NS;
-		double base_ratio = in_warmup ? 1.0 : s->sr_slow_rate;
-		double occupancy_gain =
-			lvl_err < 0.0 ? 0.15 : (in_warmup ? 0.0 : 0.08);
-		double desired_ratio =
-			base_ratio * (1.0 + occupancy_gain * lvl_err);
-		if (desired_ratio < PLAYBACK_RATIO_MIN)
-			desired_ratio = PLAYBACK_RATIO_MIN;
-		if (desired_ratio > PLAYBACK_RATIO_MAX)
-			desired_ratio = PLAYBACK_RATIO_MAX;
+		double desired_ratio = 1.0;
+		if (s->adaptive_audio_speed) {
+			double base_ratio =
+				in_warmup ? 1.0 : s->sr_slow_rate;
+			/* Occupancy is a small trim, never the old ±7.5% swing.
+			 * It remains active during warmup so a genuinely slow feed
+			 * cannot consume the initial reserve before clock settling. */
+			double occupancy_gain = 0.04;
+			desired_ratio =
+				base_ratio * (1.0 + occupancy_gain * lvl_err);
+			if (desired_ratio < PLAYBACK_RATIO_MIN)
+				desired_ratio = PLAYBACK_RATIO_MIN;
+			if (desired_ratio > PLAYBACK_RATIO_MAX)
+				desired_ratio = PLAYBACK_RATIO_MAX;
+		}
 		pthread_mutex_lock(&s->controller_mutex);
-		if (s->sr_ratio <= 0.0)
+		if (!s->adaptive_audio_speed || s->sr_ratio <= 0.0) {
 			s->sr_ratio = 1.0;
+			s->playback_ratio = 1.0;
+		}
 		double pacing_ratio = s->sr_ratio;
 		pthread_mutex_unlock(&s->controller_mutex);
 		int64_t pop_interval =
 			(int64_t)((double)frame_dur / pacing_ratio);
 
 		int pops = 0;
-		/* Cap at 8 so a post-stall backlog can be drained over a tick
-		 * without an unbounded burst. */
+		/* A normal 24/30/60 fps OBS tick may need two codec blocks. Keep a
+		 * hard ceiling so an unexpected scheduler pause cannot burst an
+		 * unbounded amount of audio into OBS. */
 		while (pops < 8) {
 			bool should_pop;
 			if (s->last_audio_pop_time == 0) {
@@ -1202,34 +1289,65 @@ static void smooth_media_tick(void *data, float seconds)
 
 			struct audio_buf_frame *buf_frame;
 			if (!audio_buffer_pop(&s->audio_buf, &buf_frame)) {
-				/* Wanted audio but buffer empty → underrun;
-				 * grow the adaptive cushion so we rebuild a
-				 * deeper buffer after the stall. */
+				/* One empty queue starts one controlled recovery.
+				 * Stop output, rebuild the adaptive reserve, reset
+				 * the stale rate estimate, then begin a fresh OBS
+				 * timestamp epoch. */
 				if (s->audio_frames_out > 0 &&
-				    !s->audio_starved) {
+				    !os_atomic_load_bool(
+					    &s->audio_rebuffering)) {
 					audio_buffer_note_underrun(
 						&s->audio_buf);
 					s->underrun_count++;
-					s->audio_starved = true;
-					if (debug &&
-					    (wall_now -
-					     s->last_underrun_log_time) >=
-						    500000000LL) {
-						SM_LOG(LOG_INFO,
-						       "DBG underrun #%llu (buf "
-						       "empty, tgt now %lldms)",
-						       (unsigned long long)s
-							       ->underrun_count,
-						       (long long)(audio_buffer_target_ns(
-									   &s->audio_buf) /
-								   1000000));
-						s->last_underrun_log_time =
-							wall_now;
-					}
+					os_atomic_set_bool(
+						&s->audio_rebuffering, true);
+					pthread_mutex_lock(&s->timing_mutex);
+					s->audio_sync_valid = false;
+					pthread_mutex_unlock(&s->timing_mutex);
+					obs_source_output_video(s->source, NULL);
+					s->last_audio_pop_time = 0;
+					clock_tracker_reset(&s->clock);
+					pthread_mutex_lock(&s->controller_mutex);
+					s->clock_skip_until_ns =
+						wall_now + CLOCK_SETTLE_NS;
+					s->did_initial_trim = true;
+					s->video_reanchor_pending = true;
+					s->sr_ratio = 1.0;
+					s->playback_ratio = 1.0;
+					pthread_mutex_unlock(&s->controller_mutex);
+					s->sr_slow_rate = 1.0;
+					audio_speed_reset(&s->speed_converter);
+					SM_LOG(LOG_INFO,
+					       "Audio interrupted; rebuffering to "
+					       "%lldms before recovery (#%llu)",
+					       (long long)(audio_buffer_target_ns(
+							   &s->audio_buf) /
+							   1000000),
+					       (unsigned long long)
+						       s->underrun_count);
 				}
 				break;
 			}
-			s->audio_starved = false;
+
+			bool recovered =
+				os_atomic_load_bool(&s->audio_rebuffering);
+			if (recovered) {
+				s->recovery_count++;
+				s->last_audio_pop_time = 0;
+				pthread_mutex_lock(&s->controller_mutex);
+				s->video_reanchor_pending = true;
+				s->did_initial_trim = true;
+				s->sr_ratio = 1.0;
+				s->playback_ratio = 1.0;
+				pthread_mutex_unlock(&s->controller_mutex);
+				SM_LOG(LOG_INFO,
+				       "Audio recovered with %lldms buffered "
+				       "(#%llu)",
+				       (long long)(audio_buffer_level_ns(
+							   &s->audio_buf) /
+							   1000000),
+				       (unsigned long long)s->recovery_count);
+			}
 
 			/* Update frame duration estimate from actual
 			 * popped frame */
@@ -1253,19 +1371,16 @@ static void smooth_media_tick(void *data, float seconds)
 			}
 
 			pthread_mutex_lock(&s->controller_mutex);
-			/* Slew gently in normal operation. If startup reserve has
-			 * fallen below half target, slowing down promptly is safer
-			 * than letting the queue empty and producing silence. */
-			double slew = in_warmup && lvl_err < -0.25 &&
-					      desired_ratio < s->sr_ratio
-				      ? SR_EMERGENCY_SLEW_PER_POP
-				      : SR_SLEW_PER_POP;
-			double dr = desired_ratio - s->sr_ratio;
-			if (dr > slew)
-				dr = slew;
-			if (dr < -slew)
-				dr = -slew;
-			s->sr_ratio += dr;
+			if (s->adaptive_audio_speed && !recovered) {
+				double dr = desired_ratio - s->sr_ratio;
+				if (dr > SR_SLEW_PER_POP)
+					dr = SR_SLEW_PER_POP;
+				if (dr < -SR_SLEW_PER_POP)
+					dr = -SR_SLEW_PER_POP;
+				s->sr_ratio += dr;
+			} else {
+				s->sr_ratio = 1.0;
+			}
 			double sr_ratio = s->sr_ratio;
 			pthread_mutex_unlock(&s->controller_mutex);
 
@@ -1273,6 +1388,7 @@ static void smooth_media_tick(void *data, float seconds)
 				obs_to_av_audio_format(buf_frame->format);
 			struct audio_speed_frame speed_frame = {0};
 			bool speed_converted =
+				s->adaptive_audio_speed &&
 				av_format != AV_SAMPLE_FMT_NONE &&
 				audio_speed_convert(
 					&s->speed_converter,
@@ -1286,49 +1402,45 @@ static void smooth_media_tick(void *data, float seconds)
 							 : buf_frame->frames;
 			uint32_t output_sample_rate = buf_frame->sample_rate;
 			pthread_mutex_lock(&s->controller_mutex);
+			if (!speed_converted)
+				s->sr_ratio = 1.0;
 			s->playback_ratio = speed_converted ? sr_ratio : 1.0;
 			pthread_mutex_unlock(&s->controller_mutex);
 
-			/* ── Timestamp computation ──
-			 * Timestamp spacing must match the duration OBS will
-			 * actually consume after speed conversion. */
+			/* Keep normal timestamps sample-contiguous and safely
+			 * ahead of OBS's mixer. Recovery and scheduler lateness
+			 * start a new epoch immediately; late audio is never
+			 * eased in gradually. */
 			int64_t audio_step = (int64_t)output_frames *
 					     1000000000LL /
 					     (int64_t)output_sample_rate;
-			int64_t out_ts;
-			if (s->audio_frames_out == 0) {
-				s->audio_next_ts = wall_now;
-				out_ts = wall_now;
-			} else {
-				s->audio_next_ts += audio_step;
-				int64_t drift_error =
-					wall_now - s->audio_next_ts;
-				bool tight_sync = s->sync_pts &&
-						  video_frames_snapshot > 0;
-
-				if (drift_error < 0)
-					s->audio_next_ts += drift_error / 10;
-				else if (tight_sync ||
-					 drift_error > 100000000LL)
-					s->audio_next_ts += drift_error / 100;
-				else
-					s->audio_next_ts += drift_error / 1000;
-
-				int64_t max_ahead =
-					tight_sync ? wall_now
-						   : wall_now + 20000000LL;
-				if (s->audio_next_ts > max_ahead)
-					s->audio_next_ts = max_ahead;
-				if (s->audio_next_ts < wall_now - 200000000LL)
-					s->audio_next_ts = wall_now;
-				out_ts = s->audio_next_ts;
+			bool pts_discontinuity = false;
+			if (os_atomic_load_bool(&s->sync_pts) &&
+			    s->audio_frames_out > 0) {
+				uint64_t pts_delta =
+					(uint64_t)buf_frame->pts_ns -
+					(uint64_t)s->prev_audio_pts;
+				pts_discontinuity =
+					buf_frame->pts_ns <= s->prev_audio_pts ||
+					pts_delta > UINT64_C(500000000);
+			}
+			uint64_t resyncs_before =
+				s->audio_timeline.resync_count;
+			int64_t out_ts = output_timeline_next(
+				&s->audio_timeline, wall_now, audio_step,
+				recovered || pts_discontinuity);
+			if (s->audio_timeline.resync_count != resyncs_before) {
+				pthread_mutex_lock(&s->controller_mutex);
+				s->video_reanchor_pending = true;
+				pthread_mutex_unlock(&s->controller_mutex);
 			}
 			s->prev_audio_pts = buf_frame->pts_ns;
-			if (s->audio_frames_out > 0 &&
-			    out_ts <= s->audio_out_ts)
-				out_ts = s->audio_out_ts + 1;
-			s->audio_next_ts = out_ts;
+			pthread_mutex_lock(&s->timing_mutex);
 			s->audio_out_ts = out_ts;
+			s->audio_sync_pts = buf_frame->pts_ns;
+			s->audio_sync_ts = out_ts;
+			s->audio_sync_valid = true;
+			pthread_mutex_unlock(&s->timing_mutex);
 
 			/* ── Output to OBS ── */
 			struct obs_source_audio obs_audio = {0};
@@ -1369,6 +1481,9 @@ static void smooth_media_tick(void *data, float seconds)
 
 			obs_source_output_audio(s->source, &obs_audio);
 			s->audio_frames_out++;
+			if (recovered)
+				os_atomic_set_bool(&s->audio_rebuffering,
+						   false);
 			pops++;
 
 			/* ── Diagnostic logging ──
@@ -1395,7 +1510,7 @@ static void smooth_media_tick(void *data, float seconds)
 					       "gap=%lldms "
 					       "pop_iv=%lldms "
 					       "av=%lldms a=%llu v=%llu drop=%llu "
-					       "under=%llu%s",
+					       "under=%llu recover=%llu resync=%llu mode=%s%s",
 					       rate, s->sr_slow_rate,
 					       s->sr_ratio, output_sample_rate,
 					       (long long)(stats.level_ns /
@@ -1417,14 +1532,22 @@ static void smooth_media_tick(void *data, float seconds)
 						       stats.frames_dropped,
 					       (unsigned long long)
 						       s->underrun_count,
-					       s->sync_pts ? " [PTS-SYNC]"
+					       (unsigned long long)
+						       s->recovery_count,
+					       (unsigned long long)
+						       s->audio_timeline.resync_count,
+					       s->adaptive_audio_speed ? "adaptive"
+								 : "original",
+					       os_atomic_load_bool(&s->sync_pts)
+						       ? " [PTS-SYNC]"
 							   : "");
 				} else {
 					SM_LOG(LOG_INFO,
 					       "DIAG: rate=%.4f speed=%.4f sr=%u "
 					       "buf=%lldms tgt=%lldms "
 					       "av_wall=%lldms "
-					       "a_out=%llu v_out=%llu%s",
+					       "a_out=%llu v_out=%llu recover=%llu "
+					       "mode=%s%s",
 					       rate, s->sr_ratio,
 					       output_sample_rate,
 					       (long long)(stats.level_ns /
@@ -1436,7 +1559,12 @@ static void smooth_media_tick(void *data, float seconds)
 						       s->audio_frames_out,
 					       (unsigned long long)
 						       video_frames_snapshot,
-					       s->sync_pts ? " [PTS-SYNC]"
+					       (unsigned long long)
+						       s->recovery_count,
+					       s->adaptive_audio_speed ? "adaptive"
+								 : "original",
+					       os_atomic_load_bool(&s->sync_pts)
+						       ? " [PTS-SYNC]"
 							   : "");
 				}
 				s->last_diag_time = wall_now;

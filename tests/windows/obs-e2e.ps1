@@ -10,6 +10,8 @@ param(
     [switch]$HardwareDecoding,
     [switch]$ExpectReconnectCycle,
     [switch]$AllowTransientDisconnects,
+    [switch]$SkipConnectionMutationChecks,
+    [switch]$RecordDuringTest,
     [switch]$CleanupOnExit,
     [int]$RequestTimeoutSeconds = 10,
     [ValidateRange(1, 60)]
@@ -25,6 +27,8 @@ $script:Socket = $null
 $script:Identified = $false
 $script:Observations = New-Object System.Collections.Generic.List[object]
 $script:CheckpointWriter = $null
+$script:RecordingStarted = $false
+$script:RecordingOutputPath = $null
 $script:CheckpointPath = if ($ResultPath) {
     if ([IO.Path]::GetExtension($ResultPath) -eq ".json") {
         [IO.Path]::ChangeExtension($ResultPath, ".jsonl")
@@ -248,6 +252,7 @@ try {
         reconnect_delay_sec = 1
         hw_decode = [bool]$HardwareDecoding
         sync_pts = $true
+        adaptive_audio_speed = $false
         close_when_inactive = $false
         disable_video = $false
         debug_logging = $true
@@ -301,19 +306,21 @@ try {
     Assert-Condition $url.success "GetStreamURL returned failure"
     Assert-Condition ($url.url -eq $StreamUrl) "GetStreamURL returned the wrong URL"
 
-    $missingUrl = Invoke-VendorRequest "SetStreamURL" @{
-        sourceName = $SourceName
-    }
-    Assert-Condition (-not $missingUrl.success) `
-        "SetStreamURL accepted a missing URL"
+    if (-not $SkipConnectionMutationChecks) {
+        $missingUrl = Invoke-VendorRequest "SetStreamURL" @{
+            sourceName = $SourceName
+        }
+        Assert-Condition (-not $missingUrl.success) `
+            "SetStreamURL accepted a missing URL"
 
-    $setUrl = Invoke-VendorRequest "SetStreamURL" @{
-        sourceName = $SourceName
-        url = $StreamUrl
+        $setUrl = Invoke-VendorRequest "SetStreamURL" @{
+            sourceName = $SourceName
+            url = $StreamUrl
+        }
+        Assert-Condition $setUrl.success "SetStreamURL returned failure"
+        Assert-Condition ($setUrl.url -eq $StreamUrl) `
+            "SetStreamURL returned the wrong URL"
     }
-    Assert-Condition $setUrl.success "SetStreamURL returned failure"
-    Assert-Condition ($setUrl.url -eq $StreamUrl) `
-        "SetStreamURL returned the wrong URL"
 
     $missing = Invoke-VendorRequest "GetStatus" @{
         sourceName = "__missing_smooth_media_audit_source__"
@@ -323,6 +330,11 @@ try {
     $status = Wait-ForPlayback -TimeoutSeconds 30
     $firstVideoFrames = [long]$status.videoFramesOut
     $firstAudioFrames = [long]$status.audioFramesOut
+
+    if ($RecordDuringTest) {
+        Invoke-ObsRequest "StartRecord" | Out-Null
+        $script:RecordingStarted = $true
+    }
 
     $stableDeadline = [DateTime]::UtcNow.AddSeconds($StableSeconds)
     $reconnectObserved = $false
@@ -410,12 +422,20 @@ try {
             [long]$livenessBefore.audioFramesOut
     ) "Audio did not advance during the final liveness check"
 
+    if ($script:RecordingStarted) {
+        $recordResult = Invoke-ObsRequest "StopRecord"
+        $script:RecordingOutputPath = $recordResult.responseData.outputPath
+        $script:RecordingStarted = $false
+    }
+
     $summary = [PSCustomObject]@{
         success = $true
         obsWebSocketVersion = $hello.d.obsWebSocketVersion
         hardwareDecoding = [bool]$HardwareDecoding
         reconnectCycleExpected = [bool]$ExpectReconnectCycle
         transientDisconnectsAllowed = [bool]$AllowTransientDisconnects
+        connectionMutationChecksSkipped = [bool]$SkipConnectionMutationChecks
+        recordingOutputPath = $script:RecordingOutputPath
         reconnectObserved = $reconnectObserved
         recoveredAfterReconnect = $recoveredAfterReconnect
         stableSeconds = $StableSeconds
@@ -459,6 +479,17 @@ try {
     }
     throw
 } finally {
+    if ($script:RecordingStarted -and $script:Identified -and
+        $script:Socket -and
+        $script:Socket.State -eq
+            [Net.WebSockets.WebSocketState]::Open) {
+        try {
+            Invoke-ObsRequest "StopRecord" -AllowFailure | Out-Null
+        } catch {
+            Write-Warning "OBS recording cleanup failed: $($_.Exception.Message)"
+        }
+        $script:RecordingStarted = $false
+    }
     if ($script:CheckpointWriter) {
         $script:CheckpointWriter.Dispose()
         $script:CheckpointWriter = $null

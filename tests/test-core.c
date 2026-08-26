@@ -1,5 +1,6 @@
 #include "audio-buffer.h"
 #include "clock-tracker.h"
+#include "output-timeline.h"
 
 #include <inttypes.h>
 #include <stdatomic.h>
@@ -108,6 +109,88 @@ static void test_buffer_trim_and_adaptation(void)
 	audio_buffer_free(&buffer);
 }
 
+static void test_buffer_reprime_after_underrun(void)
+{
+	struct audio_buffer buffer;
+	CHECK(audio_buffer_init(&buffer));
+
+	for (uint64_t i = 0; i < 4; i++)
+		CHECK(push_mono(&buffer, i, 960, (int64_t)i * 20 * NS_PER_MS,
+				(int64_t)i * 20 * NS_PER_MS));
+	CHECK(audio_buffer_is_ready(&buffer));
+
+	struct audio_buf_frame *out = NULL;
+	for (int i = 0; i < 4; i++)
+		CHECK(audio_buffer_pop(&buffer, &out));
+	CHECK(!audio_buffer_pop(&buffer, &out));
+
+	audio_buffer_note_underrun(&buffer);
+	struct audio_buffer_stats stats;
+	audio_buffer_get_stats(&buffer, &stats);
+	CHECK(!stats.primed);
+	CHECK(stats.target_ns == 140 * NS_PER_MS);
+
+	/* Recovery must wait for the new target instead of releasing isolated
+	 * frames as they arrive. */
+	uint64_t i = 0;
+	for (; i < 64 && !audio_buffer_is_ready(&buffer); i++) {
+		CHECK(push_mono(&buffer, 10 + i, 960,
+				(10 + (int64_t)i) * 20 * NS_PER_MS,
+				(10 + (int64_t)i) * 20 * NS_PER_MS));
+		if (!audio_buffer_is_ready(&buffer))
+			CHECK(!audio_buffer_pop(&buffer, &out));
+	}
+	CHECK(i < 64);
+	CHECK(audio_buffer_is_ready(&buffer));
+	CHECK(audio_buffer_pop(&buffer, &out));
+
+	audio_buffer_free(&buffer);
+}
+
+static void test_output_timeline_recovery(void)
+{
+	struct output_timeline timeline;
+	output_timeline_reset(&timeline);
+
+	const int64_t frame = 20 * NS_PER_MS;
+	int64_t wall = 5 * NS_PER_SEC;
+	int64_t first = output_timeline_next(&timeline, wall, frame, false);
+	CHECK(first == wall + OUTPUT_TIMELINE_LEAD_NS);
+
+	/* Ordinary output stays sample-contiguous and safely ahead of the OBS
+	 * mixer clock. */
+	int64_t second = output_timeline_next(
+		&timeline, wall + 33 * NS_PER_MS, frame, false);
+	CHECK(second == first + frame);
+	CHECK(second >= wall + 33 * NS_PER_MS +
+			       OUTPUT_TIMELINE_MIN_LEAD_NS);
+
+	/* A multi-second starvation starts a fresh timestamp epoch rather than
+	 * slowly feeding late audio into OBS. */
+	wall += 4 * NS_PER_SEC;
+	int64_t recovered =
+		output_timeline_next(&timeline, wall, frame, true);
+	CHECK(recovered == wall + OUTPUT_TIMELINE_LEAD_NS);
+	CHECK(recovered > second);
+	CHECK(timeline.resync_count == 1);
+
+	int64_t after = output_timeline_next(
+		&timeline, wall + 20 * NS_PER_MS, frame, false);
+	CHECK(after == recovered + frame);
+	CHECK(after >= wall + 20 * NS_PER_MS +
+			      OUTPUT_TIMELINE_MIN_LEAD_NS);
+
+	/* Scheduler lateness is also a discontinuity even when the transport
+	 * did not explicitly report one. */
+	wall += NS_PER_SEC;
+	int64_t late = output_timeline_next(&timeline, wall, frame, false);
+	CHECK(late == wall + OUTPUT_TIMELINE_LEAD_NS);
+	CHECK(timeline.resync_count == 2);
+
+	CHECK(output_timeline_next(NULL, wall, frame, false) == 0);
+	output_timeline_reset(NULL);
+}
+
 static void test_buffer_invalid_input(void)
 {
 	struct audio_buffer buffer;
@@ -117,6 +200,7 @@ static void test_buffer_invalid_input(void)
 	CHECK(!audio_buffer_pop(NULL, &out));
 	CHECK(!audio_buffer_pop(&buffer, NULL));
 	audio_buffer_note_underrun(NULL);
+	audio_buffer_note_discontinuity(NULL);
 	audio_buffer_trim_to_target(NULL);
 
 	const uint8_t byte = 1;
@@ -176,6 +260,37 @@ static void test_buffer_batched_delivery_target(void)
 	CHECK(stats.delivery_gap_ns == 600 * NS_PER_MS);
 	CHECK(stats.target_ns >= 640 * NS_PER_MS);
 	CHECK(stats.max_ns >= 890 * NS_PER_MS);
+	audio_buffer_free(&buffer);
+}
+
+static void test_buffer_discontinuity_forgets_outage_gap(void)
+{
+	struct audio_buffer buffer;
+	CHECK(audio_buffer_init(&buffer));
+
+	CHECK(push_mono(&buffer, 0, 960, 0, 0));
+	CHECK(push_mono(&buffer, 1, 960, 20 * NS_PER_MS, 600 * NS_PER_MS));
+	audio_buffer_note_underrun(&buffer);
+
+	struct audio_buffer_stats stats;
+	audio_buffer_get_stats(&buffer, &stats);
+	CHECK(stats.delivery_gap_ns == 600 * NS_PER_MS);
+	CHECK(stats.target_ns >= 640 * NS_PER_MS);
+
+	/* A confirmed outage starts a fresh delivery epoch. The underrun cushion
+	 * remains, but the outage itself must not pin the target at 750 ms. */
+	audio_buffer_note_discontinuity(&buffer);
+	audio_buffer_get_stats(&buffer, &stats);
+	CHECK(stats.delivery_gap_ns == 0);
+	CHECK(stats.jitter_ns == 0);
+	CHECK(stats.target_ns == 140 * NS_PER_MS);
+
+	CHECK(push_mono(&buffer, 2, 960, 40 * NS_PER_MS, 5 * NS_PER_SEC));
+	audio_buffer_get_stats(&buffer, &stats);
+	CHECK(stats.delivery_gap_ns == 0);
+	CHECK(stats.target_ns < 140 * NS_PER_MS);
+	CHECK(stats.target_ns >= 139 * NS_PER_MS);
+
 	audio_buffer_free(&buffer);
 }
 
@@ -422,10 +537,14 @@ int main(void)
 	test_buffer_basic();
 	fprintf(stderr, "test_buffer_trim_and_adaptation\n");
 	test_buffer_trim_and_adaptation();
+	fprintf(stderr, "test_buffer_reprime_after_underrun\n");
+	test_buffer_reprime_after_underrun();
 	fprintf(stderr, "test_buffer_invalid_input\n");
 	test_buffer_invalid_input();
 	fprintf(stderr, "test_buffer_batched_delivery_target\n");
 	test_buffer_batched_delivery_target();
+	fprintf(stderr, "test_buffer_discontinuity_forgets_outage_gap\n");
+	test_buffer_discontinuity_forgets_outage_gap();
 	fprintf(stderr, "test_large_storage_is_released\n");
 	test_large_storage_is_released();
 	fprintf(stderr, "test_buffer_concurrency\n");
@@ -436,6 +555,8 @@ int main(void)
 	test_clock_batched_delivery();
 	fprintf(stderr, "test_clock_concurrency\n");
 	test_clock_concurrency();
+	fprintf(stderr, "test_output_timeline_recovery\n");
+	test_output_timeline_recovery();
 
 	if (failures != 0) {
 		fprintf(stderr, "%d test assertion(s) failed\n", failures);

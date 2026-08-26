@@ -22,6 +22,7 @@ add_executable(core-tests
     test-core.c
     ../src/audio-buffer.c
     ../src/clock-tracker.c
+    ../src/output-timeline.c
 )
 
 target_include_directories(core-tests PRIVATE
