@@ -823,7 +823,7 @@ static void smooth_media_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, "reconnect_delay_sec", 5);
 	obs_data_set_default_bool(settings, "hw_decode", false);
-	obs_data_set_default_bool(settings, "sync_pts", true);
+	obs_data_set_default_bool(settings, "sync_pts", false);
 	obs_data_set_default_bool(settings, "adaptive_audio_speed", false);
 	obs_data_set_default_bool(settings, "close_when_inactive", true);
 	obs_data_set_default_bool(settings, "disable_video", false);
@@ -883,11 +883,6 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 		p, "Use GPU-accelerated decoding (NVDEC, QSV, VAAPI).\n"
 		   "Reduces CPU load but may not support all codecs.");
 
-	p = obs_properties_add_bool(play, "sync_pts", "Sync A/V via PTS");
-	obs_property_set_long_description(
-		p, "Keep audio and video aligned to presentation timestamps and\n"
-		   "reset cleanly after timestamp jumps. Recommended for live streams.");
-
 	p = obs_properties_add_bool(play, "adaptive_audio_speed",
 				    "Adaptive Audio Speed");
 	obs_property_set_long_description(
@@ -915,6 +910,12 @@ static obs_properties_t *smooth_media_get_properties(void *data)
 
 	/* ── Advanced ── */
 	obs_properties_t *adv = obs_properties_create();
+
+	p = obs_properties_add_bool(adv, "sync_pts",
+				    "Strict PTS A/V Sync (Experimental)");
+	obs_property_set_long_description(
+		p, "Align video directly to the source audio timestamps.\n"
+		   "Leave off normally. Try this only if normal playback drifts.");
 
 	p = obs_properties_add_text(adv, "ffmpeg_options", "FFmpeg Options",
 				    OBS_TEXT_DEFAULT);

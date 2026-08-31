@@ -45,7 +45,7 @@ The default settings are a good starting point.
 | Input Format | Forces a format such as `mpegts`; leave blank unless needed |
 | Reconnect Delay | How long to wait before reconnecting |
 | Hardware Decoding | Uses the GPU when a supported decoder is available |
-| Sync A/V via PTS | Uses the feed timestamps for tighter A/V sync |
+| Strict PTS A/V Sync | Advanced fallback for feeds that drift with normal sync; leave off unless needed |
 | Adaptive Audio Speed | Slightly corrects a feed whose clock always runs fast or slow; leave off for original-speed audio |
 | Close When Inactive | Disconnects when the source is not in use |
 | Disable Video Preview | Keeps audio running without sending video to OBS |

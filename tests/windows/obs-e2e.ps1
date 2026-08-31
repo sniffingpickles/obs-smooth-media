@@ -8,6 +8,7 @@ param(
     [int]$StableSeconds = 30,
     [int]$RestartIterations = 20,
     [switch]$HardwareDecoding,
+    [switch]$StrictPtsSync,
     [switch]$ExpectReconnectCycle,
     [switch]$AllowTransientDisconnects,
     [switch]$SkipConnectionMutationChecks,
@@ -251,7 +252,7 @@ try {
         input_format = $InputFormat
         reconnect_delay_sec = 1
         hw_decode = [bool]$HardwareDecoding
-        sync_pts = $true
+        sync_pts = [bool]$StrictPtsSync
         adaptive_audio_speed = $false
         close_when_inactive = $false
         disable_video = $false
